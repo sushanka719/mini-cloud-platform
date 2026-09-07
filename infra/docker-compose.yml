@@ -1,0 +1,44 @@
+# Local infrastructure for ForgeCloud: Postgres + Redis.
+# Host ports are shifted (5433 / 6380) so a locally-installed Postgres/Redis
+# on the default ports doesn't collide with these.
+name: forgecloud
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: forge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: forge
+      POSTGRES_PASSWORD: forge
+      POSTGRES_DB: forgecloud
+    ports:
+      - '5433:5432'
+    volumes:
+      - forge-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U forge -d forgecloud']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: forge-redis
+    restart: unless-stopped
+    # appendonly keeps queue state across restarts so a compose restart mid-demo
+    # doesn't silently drop queued deployments.
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6380:6379'
+    volumes:
+      - forge-redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  forge-pgdata:
+  forge-redisdata:
