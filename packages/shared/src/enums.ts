@@ -44,6 +44,30 @@ export function isTerminalStatus(status: DeploymentStatus): boolean {
   return (TERMINAL_DEPLOYMENT_STATUSES as readonly DeploymentStatus[]).includes(status);
 }
 
+/**
+ * Statuses in which exactly one worker owns the row and is expected to be
+ * moving it along. `queued` is deliberately absent: a queued deployment is
+ * owned by the queue, not by a process.
+ *
+ * This is the set Phase 10's crash recovery reads. If a row sits in one of
+ * these and the worker whose id is on it is no longer heartbeating, the row is
+ * describing a process that does not exist — and something has to say so,
+ * either by taking the job over or by recording the loss.
+ */
+export const IN_FLIGHT_DEPLOYMENT_STATUSES = [
+  'assigned',
+  'cloning',
+  'installing',
+  'building',
+  'creating_container',
+  'starting',
+  'health_check',
+] as const satisfies readonly DeploymentStatus[];
+
+export function isInFlightStatus(status: DeploymentStatus): boolean {
+  return (IN_FLIGHT_DEPLOYMENT_STATUSES as readonly DeploymentStatus[]).includes(status);
+}
+
 export const WORKER_STATUSES = ['idle', 'busy', 'offline', 'draining'] as const;
 export const workerStatusSchema = z.enum(WORKER_STATUSES);
 export type WorkerStatus = z.infer<typeof workerStatusSchema>;

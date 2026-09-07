@@ -45,6 +45,42 @@ async function toApiError(res: Response): Promise<ApiError> {
   );
 }
 
+/**
+ * Which API replica served the most recent request, from the proxy's
+ * `x-forge-upstream` response header (Phase 10).
+ *
+ * A module-level box rather than state threaded through every call: it is a
+ * diagnostic about the *transport*, wanted by exactly one panel, and plumbing
+ * it through `api.get` would change the shape of every call site for it. The
+ * value is `null` whenever the dashboard is talking straight to a replica —
+ * there is no proxy to name one.
+ *
+ * Subscribers exist because the header changes on every request (that is the
+ * point of round-robin) and React has no way to notice a mutated module
+ * variable.
+ */
+let lastUpstream: string | null = null;
+const upstreamListeners = new Set<(upstream: string | null) => void>();
+
+export function getLastUpstream(): string | null {
+  return lastUpstream;
+}
+
+export function onUpstreamChange(listener: (upstream: string | null) => void): () => void {
+  upstreamListeners.add(listener);
+  return () => upstreamListeners.delete(listener);
+}
+
+function recordUpstream(res: Response): void {
+  const upstream = res.headers.get('x-forge-upstream');
+  // Only a *present* header updates the box. A response that omits it (an
+  // error page the proxy wrote itself, a request that never reached a replica)
+  // must not be read as "the proxy disappeared".
+  if (!upstream || upstream === lastUpstream) return;
+  lastUpstream = upstream;
+  for (const listener of upstreamListeners) listener(upstream);
+}
+
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
     ...init,
@@ -57,6 +93,8 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
       ...init.headers,
     },
   });
+
+  recordUpstream(res);
 
   if (!res.ok) throw await toApiError(res);
   if (res.status === 204) return undefined as T;
@@ -274,9 +312,16 @@ export type Deployment = {
   sourceRef: string | null;
   sourceFileId: string | null;
   idempotencyKey: string | null;
+  /** Runs of this row so far; incremented on every claim. */
   attempt: number;
+  /** The ceiling on `attempt` for the currently queued job. */
+  maxAttempts: number;
+  /** Set when the retry budget ran out and the job was parked in the DLQ. */
+  deadLetteredAt: string | null;
   triggeredBy: string | null;
   workerId: string | null;
+  /** The worker's registry name, joined server-side (Phase 10). */
+  workerName: string | null;
   parentDeploymentId: string | null;
   imageTag: string | null;
   containerId: string | null;
@@ -300,6 +345,47 @@ export type DeploymentEvent = {
   stream: 'stdout' | 'stderr' | 'system' | null;
   message: string | null;
   createdAt: string;
+};
+
+export type ContainerStats = {
+  deploymentId: string;
+  containerId: string;
+  cpuPercent: number;
+  memoryBytes: number;
+  memoryLimitBytes: number;
+  memoryPercent: number;
+  pids: number;
+  pidsLimit: number;
+  state: string;
+  at: string;
+};
+
+export type ContainerSummary = {
+  deploymentId: string;
+  projectId: string;
+  projectName: string;
+  projectSlug: string;
+  orgId: string;
+  status: DeploymentStatus;
+  containerId: string | null;
+  imageTag: string | null;
+  url: string | null;
+  hostPort: number | null;
+  appPort: number;
+  healthPath: string;
+  attempt: number;
+  startedAt: string | null;
+  liveSince: string | null;
+  isActive: boolean;
+  /** null when no worker has sampled this container recently. */
+  stats: ContainerStats | null;
+};
+
+export type ContainerActionResult = {
+  action: 'stop' | 'restart';
+  deploymentId: string;
+  enqueued: boolean;
+  message: string;
 };
 
 export type WorkerView = {
@@ -327,7 +413,208 @@ export type QueueStats = {
   paused: boolean;
 };
 
-export type Fleet = { queue: QueueStats; workers: WorkerView[] };
+/**
+ * One API replica (Phase 10). Projected server-side out of the process-metrics
+ * document each replica writes to Redis under a TTL — so this list is exactly
+ * "the replicas that are reporting right now", and a killed one drops off on
+ * its own.
+ */
+export type ApiReplica = {
+  instance: string;
+  host: string;
+  pid: number;
+  uptimeMs: number;
+  cpuPercent: number;
+  rssBytes: number;
+  sockets: number;
+  requestsPerSecond: number;
+  inflight: number;
+  at: string;
+};
+
+export type Fleet = {
+  queue: QueueStats;
+  deadLetter: QueueStats;
+  containerActions: QueueStats;
+  workers: WorkerView[];
+  api: ApiReplica[];
+};
+
+/**
+ * `GET /__forge/proxy` — served by the reverse proxy itself, not by the API.
+ *
+ * Only reachable when the dashboard is pointed at the proxy, which is why the
+ * fleet page treats a failed fetch as "no proxy in front of us" rather than as
+ * an error: talking straight to one replica is a perfectly valid setup.
+ */
+export type ProxyStatus = {
+  ok: boolean;
+  port: number;
+  uptimeMs: number;
+  healthPath: string;
+  upstreams: {
+    target: string;
+    healthy: boolean;
+    requests: number;
+    upgrades: number;
+    connectErrors: number;
+    lastProbeMs: number | null;
+    lastError: string | null;
+  }[];
+  healthy: number;
+  total: number;
+  requests: number;
+  upgrades: number;
+  at: string;
+};
+
+export const PROXY_STATUS_PATH = '/__forge/proxy';
+
+// --- observability (Phase 9) -------------------------------------------------
+
+export type ProcessRole = 'api' | 'worker';
+
+/** Mirrors `eventLoopLagSchema` — reset every reporting interval. */
+export type EventLoopLag = { meanMs: number; p50Ms: number; p99Ms: number; maxMs: number };
+
+export type ApiRuntimeMetrics = {
+  sockets: number;
+  topics: number;
+  pubsubChannels: number;
+  pubsubConnected: boolean;
+  requests: number;
+  requestsPerSecond: number;
+  inflight: number;
+  serverErrors: number;
+  clientErrors: number;
+  latencyMs: { p50: number; p95: number; max: number };
+};
+
+export type WorkerRuntimeMetrics = {
+  workerId: string | null;
+  status: string;
+  activeJobs: number;
+  concurrency: number;
+  activeBuilds: number;
+  dockerAvailable: boolean;
+};
+
+/** Mirrors `processMetricsSchema` — one live process, read from Redis. */
+export type ProcessMetrics = {
+  role: ProcessRole;
+  instance: string;
+  pid: number;
+  host: string;
+  nodeVersion: string;
+  uptimeMs: number;
+  sampledOverMs: number;
+  cpuPercent: number;
+  userCpuPercent: number;
+  systemCpuPercent: number;
+  eventLoopUtilization: number;
+  eventLoopLag: EventLoopLag;
+  rssBytes: number;
+  heapUsedBytes: number;
+  heapTotalBytes: number;
+  externalBytes: number;
+  arrayBuffersBytes: number;
+  activeResources: number;
+  api: ApiRuntimeMetrics | null;
+  worker: WorkerRuntimeMetrics | null;
+  at: string;
+};
+
+/** null rather than 0 when nothing was measured — see `durationStatsSchema`. */
+export type DurationStats = {
+  count: number;
+  meanMs: number | null;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  maxMs: number | null;
+};
+
+export type FailureBucket = { code: string; count: number };
+
+export type DeploymentMetrics = {
+  windowMinutes: number;
+  total: number;
+  byStatus: Partial<Record<DeploymentStatus, number>>;
+  succeeded: number;
+  failed: number;
+  retried: number;
+  deadLettered: number;
+  inFlight: number;
+  /** null when nothing settled in the window. */
+  successRate: number | null;
+  duration: DurationStats;
+  failuresByCode: FailureBucket[];
+};
+
+/** Mirrors `metricsSnapshotSchema` — one consistent read of the whole system. */
+export type MetricsSnapshot = {
+  at: string;
+  servedBy: string;
+  processes: ProcessMetrics[];
+  queues: QueueStats[];
+  deployments: DeploymentMetrics;
+  containers: ContainerStats[];
+  dependencies: {
+    postgres: { ok: boolean; latencyMs: number };
+    redis: { ok: boolean; latencyMs: number };
+  };
+};
+
+/** Mirrors `retryResultSchema`. `enqueued: false` means "nothing to do". */
+export type RetryResult = {
+  deploymentId: string;
+  enqueued: boolean;
+  attempt: number;
+  maxAttempts: number;
+  message: string;
+};
+
+/** Mirrors `rollbackTargetSchema` — a deployment that can be returned to. */
+export type RollbackTarget = {
+  deploymentId: string;
+  status: DeploymentStatus;
+  attempt: number;
+  imageTag: string | null;
+  sourceRef: string | null;
+  /** The tag is recorded; the image itself may since have been pruned. */
+  hasImage: boolean;
+  hasArtifact: boolean;
+  artifactBytes: number | null;
+  liveAt: string | null;
+  createdAt: string;
+};
+
+/** Mirrors `deadLetterEntrySchema` — one exhausted deployment, parked. */
+export type DeadLetterEntry = {
+  jobId: string;
+  deploymentId: string;
+  projectId: string;
+  orgId: string;
+  attempt: number;
+  maxAttempts: number;
+  errorCode: string;
+  errorMessage: string;
+  /** False when the failure was unrecoverable and no retry was attempted. */
+  retryable: boolean;
+  failedAt: string;
+  workerName: string | null;
+  /** The deployment's status *now* — often no longer `failed`. */
+  currentStatus: DeploymentStatus | null;
+  projectName: string | null;
+};
+
+/**
+ * Stages a rollback legitimately skips, by where its image came from.
+ * Mirrors `ROLLBACK_SKIPPED_STAGES` in @forge/shared.
+ */
+export const ROLLBACK_SKIPPED_STAGES: Record<'image' | 'artifact', DeploymentStatus[]> = {
+  image: ['cloning', 'installing', 'building'],
+  artifact: ['installing', 'building'],
+};
 
 /** Durations, for deployment timings. */
 export function formatDuration(ms: number | null): string {
@@ -337,6 +624,17 @@ export function formatDuration(ms: number | null): string {
   if (seconds < 60) return `${seconds.toFixed(1)}s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ${Math.round(seconds % 60)}s`;
+}
+
+/** "4m 12s" / "3h 05m" — for uptimes, where formatDuration's ms are noise. */
+export function formatUptime(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${String(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${String(minutes)}m ${String(seconds % 60)}s`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${String(hours)}h ${String(minutes % 60).padStart(2, '0')}m`;
+  return `${String(Math.floor(hours / 24))}d ${String(hours % 24)}h`;
 }
 
 /** "3s ago" / "4m ago" — relative, so a polling list feels live. */
@@ -376,6 +674,12 @@ export function formatBytes(bytes: number): string {
     unit += 1;
   }
   return `${value.toFixed(1)} ${units[unit]}`;
+}
+
+/** Percentages from the container stats: one decimal, never "NaN%". */
+export function formatPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
+  return `${value.toFixed(1)}%`;
 }
 
 export async function fetchHealth(): Promise<HealthResponse> {

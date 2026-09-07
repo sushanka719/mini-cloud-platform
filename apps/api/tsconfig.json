@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "outDir": "dist", "rootDir": "src", "types": ["node"] },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/config" }, { "path": "../../packages/db" }, { "path": "../../packages/queue" }, { "path": "../../packages/shared" }, { "path": "../../packages/storage" }]
+  "references": [{ "path": "../../packages/config" }, { "path": "../../packages/db" }, { "path": "../../packages/metrics" }, { "path": "../../packages/queue" }, { "path": "../../packages/shared" }, { "path": "../../packages/storage" }]
 }

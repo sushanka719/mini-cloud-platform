@@ -212,7 +212,12 @@ export default function ProjectPage({
         </form>
       </Panel>
 
-      <DeploymentsPanel orgSlug={orgSlug} projectId={projectId} canDeploy={canEdit} />
+      <DeploymentsPanel
+        orgSlug={orgSlug}
+        projectId={projectId}
+        canDeploy={canEdit}
+        healthPath={project.data.healthPath}
+      />
       <EnvVarsPanel orgSlug={orgSlug} projectId={projectId} canEdit={canEdit} />
       <SourceUploadPanel orgSlug={orgSlug} projectId={projectId} canUpload={canEdit} />
       <ArtifactsPanel orgSlug={orgSlug} projectId={projectId} canEdit={canEdit} />

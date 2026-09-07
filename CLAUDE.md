@@ -155,7 +155,7 @@ A task is done when:
 
 ## 11. Conventions (summary — full version in docs/CONVENTIONS.md)
 
-- **Package names:** `@forge/api`, `@forge/worker`, `@forge/dashboard`, `@forge/db`, `@forge/queue`, `@forge/shared`, `@forge/config`.
+- **Package names:** `@forge/api`, `@forge/worker`, `@forge/dashboard`, `@forge/db`, `@forge/queue`, `@forge/storage`, `@forge/metrics`, `@forge/shared`, `@forge/config`.
 - **Types & schemas live in `@forge/shared`** and are imported everywhere; don't redefine a deployment status in three places.
 - **DB access only through `@forge/db`** (Kysely). No raw `pg` scattered in route handlers.
 - **Queue definitions only in `@forge/queue`**; both API (producer) and worker (consumer) import from it.

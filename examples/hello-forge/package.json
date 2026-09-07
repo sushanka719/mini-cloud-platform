@@ -1,0 +1,11 @@
+{
+  "name": "hello-forge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The sample app ForgeCloud deploys in demos. Zero dependencies on purpose: `npm install` works offline and finishes fast.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node dist/server.mjs"
+  }
+}

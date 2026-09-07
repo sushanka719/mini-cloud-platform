@@ -1,13 +1,5 @@
 import { notFound, type EnvVar, type UpsertEnvVarInput } from '@forge/shared';
-import type { ProjectEnvVarRow } from '@forge/db';
-import { decryptSecret, encryptSecret } from '../lib/secret-box.js';
-import {
-  deleteEnvVar,
-  findEnvVar,
-  listEnvVars,
-  upsertEnvVar,
-  upsertEnvVars,
-} from '../repositories/env-var-repository.js';
+import { decryptSecret, encryptSecret, envVarRepo, type ProjectEnvVarRow } from '@forge/db';
 
 /**
  * Env vars are always encrypted at rest. `is_secret` controls *disclosure*, not
@@ -31,14 +23,14 @@ function toEnvVar(row: ProjectEnvVarRow): EnvVar {
 }
 
 export async function getEnvVars(projectId: string): Promise<EnvVar[]> {
-  return (await listEnvVars(projectId)).map(toEnvVar);
+  return (await envVarRepo.listEnvVars(projectId)).map(toEnvVar);
 }
 
 export async function setEnvVar(
   projectId: string,
   input: UpsertEnvVarInput,
 ): Promise<EnvVar> {
-  const row = await upsertEnvVar({
+  const row = await envVarRepo.upsertEnvVar({
     projectId,
     key: input.key,
     valueEnc: encryptSecret(input.value),
@@ -52,7 +44,7 @@ export async function setEnvVars(
   projectId: string,
   inputs: UpsertEnvVarInput[],
 ): Promise<EnvVar[]> {
-  const rows = await upsertEnvVars(
+  const rows = await envVarRepo.upsertEnvVars(
     inputs.map((input) => ({
       projectId,
       key: input.key,
@@ -65,7 +57,7 @@ export async function setEnvVars(
 }
 
 export async function removeEnvVar(projectId: string, key: string): Promise<void> {
-  const deleted = await deleteEnvVar(projectId, key);
+  const deleted = await envVarRepo.deleteEnvVar(projectId, key);
   if (deleted === 0) throw notFound('ENV_VAR_NOT_FOUND', `No env var named "${key}"`);
 }
 
@@ -75,7 +67,7 @@ export async function removeEnvVar(projectId: string, key: string): Promise<void
  * Phase 6, and it is the only function that returns secret plaintext.
  */
 export async function resolveEnvForBuild(projectId: string): Promise<Record<string, string>> {
-  const rows = await listEnvVars(projectId);
+  const rows = await envVarRepo.listEnvVars(projectId);
   const resolved: Record<string, string> = {};
   for (const row of rows) resolved[row.key] = decryptSecret(row.value_enc);
   return resolved;
@@ -83,7 +75,7 @@ export async function resolveEnvForBuild(projectId: string): Promise<Record<stri
 
 /** Reads a single var's plaintext. Same rule as above: not exposed over HTTP. */
 export async function revealEnvVar(projectId: string, key: string): Promise<string> {
-  const row = await findEnvVar(projectId, key);
+  const row = await envVarRepo.findEnvVar(projectId, key);
   if (!row) throw notFound('ENV_VAR_NOT_FOUND', `No env var named "${key}"`);
   return decryptSecret(row.value_enc);
 }

@@ -4,8 +4,7 @@ import type { Readable } from 'node:stream';
 import { env } from '@forge/config';
 import { badRequest, type StoredFile } from '@forge/shared';
 import { sourceKey } from '@forge/storage';
-import type { ProjectRow } from '@forge/db';
-import { insertFile } from '../repositories/file-repository.js';
+import { fileRepo, type ProjectRow } from '@forge/db';
 import { objectStore } from '../lib/object-store.js';
 import { toStoredFile } from './serializers.js';
 
@@ -66,7 +65,7 @@ export async function storeProjectSource(
     },
   });
 
-  const row = await insertFile({
+  const row = await fileRepo.insertFile({
     projectId: project.id,
     deploymentId: null,
     kind: 'source',

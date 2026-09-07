@@ -126,15 +126,25 @@ export interface DeploymentsTable {
   source_ref: string | null;
   source_file_id: string | null;
   idempotency_key: string | null;
+  /** Runs of this row so far; incremented on every claim (Phase 8). */
   attempt: Generated<number>;
+  /** The retry budget in force when the row was created. */
+  max_attempts: Generated<number>;
+  /** Set when the budget was spent and the job was parked in the DLQ. */
+  dead_lettered_at: Timestamp | null;
   triggered_by: string | null;
   worker_id: string | null;
+  /** The deployment this one rolls back to, when it is a rollback. */
   parent_deployment_id: string | null;
   image_tag: string | null;
   container_id: string | null;
   url: string | null;
   host_port: number | null;
-  /** Demo hook: the simulated pipeline fails here. Phase 6 makes it a no-op. */
+  /**
+   * Demo hook: the pipeline throws on entering this stage. Kept working for the
+   * real pipeline too — Phase 11's failure demos need a way to fail a stage
+   * that a healthy sample app cannot reach on its own.
+   */
   fail_at: DeploymentStatus | null;
   error_code: string | null;
   error_message: string | null;

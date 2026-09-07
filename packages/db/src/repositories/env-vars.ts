@@ -1,4 +1,14 @@
-import { getDb, type ProjectEnvVarRow } from '@forge/db';
+import { getDb } from '../client.js';
+import type { ProjectEnvVarRow } from '../types.js';
+import { decryptSecret } from '../secret-box.js';
+
+/**
+ * Project env vars. Values are always AES-GCM encrypted at rest; `is_secret`
+ * controls *disclosure*, not storage (DATA_MODEL §5).
+ *
+ * Shared rather than API-local because both apps read this table: the API to
+ * manage the values, and the worker to inject them into a build.
+ */
 
 export async function listEnvVars(projectId: string): Promise<ProjectEnvVarRow[]> {
   return getDb()
@@ -91,4 +101,22 @@ export async function deleteEnvVar(projectId: string, key: string): Promise<numb
     .where('key', '=', key)
     .executeTakeFirst();
   return Number(result.numDeletedRows);
+}
+
+/** One resolved env var, with the flag that decides whether it gets masked. */
+export type ResolvedEnvVar = { key: string; value: string; isSecret: boolean };
+
+/**
+ * Decrypted key/value pairs for the deployment pipeline — the only function
+ * here that returns secret plaintext, and deliberately not reachable from any
+ * HTTP route. `isSecret` is carried through so the worker can build a redactor
+ * for the build log (CLAUDE.md §8).
+ */
+export async function resolveEnvForBuild(projectId: string): Promise<ResolvedEnvVar[]> {
+  const rows = await listEnvVars(projectId);
+  return rows.map((row) => ({
+    key: row.key,
+    value: decryptSecret(row.value_enc),
+    isSecret: row.is_secret,
+  }));
 }

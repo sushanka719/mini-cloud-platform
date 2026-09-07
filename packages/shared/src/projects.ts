@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { fileCompressionSchema, fileKindSchema } from './enums.js';
 import { nameSchema, slugSchema } from './auth.js';
+import { isRunnableCommand } from './commands.js';
 
 /** Where a project's source comes from. Git intake lands after Phase 2. */
 export const SOURCE_TYPES = ['upload', 'git'] as const;
@@ -22,6 +23,12 @@ export const commandSchema = z
   .max(500)
   .refine((v) => !SHELL_METACHARACTERS.test(v), {
     message: 'Commands run without a shell; ; & | ` $ > < and backslashes are not allowed',
+  })
+  // The worker tokenises this into `spawn(file, args)`. Checking here that it
+  // *can* be tokenised means an unbalanced quote is a 400 on the settings form
+  // rather than a failed deployment ten minutes later.
+  .refine(isRunnableCommand, {
+    message: 'Could not be parsed into a program and arguments (check the quoting)',
   });
 
 /**

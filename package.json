@@ -15,6 +15,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "pnpm -r test",
+    "cluster": "node scripts/cluster.mjs",
     "infra:up": "docker compose -f infra/docker-compose.yml up -d",
     "infra:down": "docker compose -f infra/docker-compose.yml down",
     "infra:logs": "docker compose -f infra/docker-compose.yml logs -f",

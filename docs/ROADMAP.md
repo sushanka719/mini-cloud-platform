@@ -88,63 +88,63 @@ Goal: the dashboard shows the pipeline moving *live*.
 ## Phase 6 — Real builds via `child_process`
 Goal: actually run install + build and stream real logs.
 
-- [ ] Pipeline stages `cloning` (copy source from storage to a sandbox dir) → `installing` → `building` via `spawn` (`shell:false`).
-- [ ] Line-split Transform stream → publish log lines → WS; dual-write to log file + `deployment_events`.
-- [ ] Timeouts + kill + cleanup on failure; capture exit codes.
-- [ ] Path sandboxing: all paths validated against the deployment's root.
-- [ ] Dashboard: live scrolling build log.
+- [x] Pipeline stages `cloning` (copy source from storage to a sandbox dir) → `installing` → `building` via `spawn` (`shell:false`).
+- [x] Line-split Transform stream → publish log lines → WS; dual-write to log file + `deployment_events`.
+- [x] Timeouts + kill + cleanup on failure; capture exit codes.
+- [x] Path sandboxing: all paths validated against the deployment's root.
+- [x] Dashboard: live scrolling build log.
 
-**Demo checkpoint:** real `npm install && npm run build` output streams to the browser.
+**Demo checkpoint:** real `npm install && npm run build` output streams to the browser. ✅ **Done — see [PROGRESS.md](../PROGRESS.md).**
 
 ---
 
 ## Phase 7 — Docker deployment via `dockerode`
 Goal: run the built app in a container and go truly LIVE.
 
-- [ ] `creating_container` → build/prepare image, create container with **resource limits** (memory, CPU, pids), non-root, no host net by default.
-- [ ] `starting` → start container; map a host port; stream container logs (demuxed) to WS.
-- [ ] `health_check` → HTTP GET `health_path` until 2xx or timeout.
-- [ ] On success → `live` (+ url, container_id, host_port, duration); set `projects.active_deployment_id`.
-- [ ] Stop/restart deployment; remove container on stop; Redis lock = one live container per project.
-- [ ] Dashboard: running containers list, app URL, per-container CPU/mem.
+- [x] `creating_container` → build/prepare image, create container with **resource limits** (memory, CPU, pids), non-root, no host net by default.
+- [x] `starting` → start container; map a host port; stream container logs (demuxed) to WS.
+- [x] `health_check` → HTTP GET `health_path` until 2xx or timeout.
+- [x] On success → `live` (+ url, container_id, host_port, duration); set `projects.active_deployment_id`.
+- [x] Stop/restart deployment; remove container on stop; Redis lock = one live container per project.
+- [x] Dashboard: running containers list, app URL, per-container CPU/mem.
 
-**Demo checkpoint:** deploy a sample app end-to-end and open its URL locally.
+**Demo checkpoint:** deploy a sample app end-to-end and open its URL locally. ✅ **Done — see [PROGRESS.md](../PROGRESS.md).**
 
 ---
 
 ## Phase 8 — Retries, rollback, idempotency, dead-letter
 Goal: the resilience story.
 
-- [ ] BullMQ retry with backoff; `attempt` tracked; exhausted → **dead-letter** queue + `failed`.
-- [ ] Rollback: start a new deployment from a prior `live` artifact/image, health check, swap active, stop old (record `parent_deployment_id`).
-- [ ] Idempotency: duplicate deploy click returns existing deployment, no duplicate container.
-- [ ] Dashboard: retry button, rollback button, build history with failures.
+- [x] BullMQ retry with backoff; `attempt` tracked; exhausted → **dead-letter** queue + `failed`.
+- [x] Rollback: start a new deployment from a prior `live` artifact/image, health check, swap active, stop old (record `parent_deployment_id`).
+- [x] Idempotency: duplicate deploy click returns existing deployment, no duplicate container.
+- [x] Dashboard: retry button, rollback button, build history with failures.
 
-**Demo checkpoint:** force a failure → auto-retry → then rollback to the last good deployment.
+**Demo checkpoint:** ✅ force a failure → auto-retry → then rollback to the last good deployment.
 
 ---
 
 ## Phase 9 — Observability
 Goal: the metrics dashboard.
 
-- [ ] Event-loop lag (`perf_hooks`), CPU/mem (`process.*`), per-container stats (Docker API).
-- [ ] Queue depth/active/failed; deployment durations; success/failure counts; health.
-- [ ] `/metrics` (Prometheus text) + `metrics` WS topic.
-- [ ] Dashboard: charts for CPU/memory/queue/duration + system activity view.
+- [x] Event-loop lag (`perf_hooks`), CPU/mem (`process.*`), per-container stats (Docker API).
+- [x] Queue depth/active/failed; deployment durations; success/failure counts; health.
+- [x] `/metrics` (Prometheus text) + `metrics` WS topic.
+- [x] Dashboard: charts for CPU/memory/queue/duration + system activity view.
 
-**Demo checkpoint:** metrics update live while a deployment runs.
+**Demo checkpoint:** ✅ metrics update live while a deployment runs — see [PROGRESS.md](../PROGRESS.md).
 
 ---
 
 ## Phase 10 — Local scaling
 Goal: prove horizontal architecture on one laptop.
 
-- [ ] Run multiple API replicas behind a reverse proxy (Caddy/Nginx or tiny Node proxy); sessions already in Redis (no sticky).
-- [ ] Run multiple workers competing on the queue.
-- [ ] Show a worker crash mid-build → job retried on another worker.
-- [ ] Dashboard: worker fleet + which worker ran which deployment.
+- [x] Run multiple API replicas behind a reverse proxy (hand-written Node proxy, `apps/proxy`); sessions already in Redis (no sticky).
+- [x] Run multiple workers competing on the queue (`pnpm cluster --api N --workers M`).
+- [x] Show a worker crash mid-build → job retried on another worker.
+- [x] Dashboard: worker fleet + which worker ran which deployment.
 
-**Demo checkpoint:** kill a worker mid-deploy, watch another finish the job.
+**Demo checkpoint:** ✅ kill a worker mid-deploy, watch another finish the job — see [PROGRESS.md](../PROGRESS.md).
 
 ---
 

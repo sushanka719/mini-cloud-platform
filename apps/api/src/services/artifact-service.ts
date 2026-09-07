@@ -3,8 +3,7 @@ import { basename } from 'node:path';
 import { env } from '@forge/config';
 import { AppError, badRequest, conflict, type ArtifactResult } from '@forge/shared';
 import { artifactKey, gzipObject } from '@forge/storage';
-import type { ProjectRow } from '@forge/db';
-import { insertFile } from '../repositories/file-repository.js';
+import { fileRepo, type ProjectRow } from '@forge/db';
 import { requireProjectFile } from './file-service.js';
 import { objectStore } from '../lib/object-store.js';
 import { toStoredFile } from './serializers.js';
@@ -59,7 +58,7 @@ export async function compressProjectFile(
   // The recorded checksum always describes the bytes as stored; the plain size
   // and hash of the original go in the `uncompressed_*` columns, so a later
   // decompressed download can be verified without gunzipping anything first.
-  const row = await insertFile({
+  const row = await fileRepo.insertFile({
     projectId: project.id,
     deploymentId: null,
     kind: 'artifact',

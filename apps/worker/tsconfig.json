@@ -5,6 +5,7 @@
   "references": [
     { "path": "../../packages/config" },
     { "path": "../../packages/db" },
+    { "path": "../../packages/metrics" },
     { "path": "../../packages/queue" },
     { "path": "../../packages/shared" },
     { "path": "../../packages/storage" }

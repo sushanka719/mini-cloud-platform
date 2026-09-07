@@ -8,6 +8,7 @@ import {
 } from '@forge/shared';
 import type { Redis } from 'ioredis';
 import { closeRedis, createRedis } from './connection.js';
+import { defaultJobOptions, requireConfig, trackBorrowed, withDeadline } from './runtime.js';
 
 /**
  * The `deployments` queue: the one seam between the API (producer) and the
@@ -15,79 +16,8 @@ import { closeRedis, createRedis } from './connection.js';
  * and the payload shape are defined exactly once (CLAUDE.md §11).
  */
 
-export type QueueConfig = {
-  redisUrl: string;
-  /**
-   * Deadline for a single producer-side queue operation. BullMQ's connections
-   * must use `maxRetriesPerRequest: null` (blocking commands would otherwise be
-   * aborted), which means a command issued while Redis is down waits forever.
-   * A producer must not: an HTTP request has to fail visibly instead of
-   * hanging (CLAUDE.md §10).
-   */
-  operationTimeoutMs?: number;
-  /** BullMQ attempts per job. Phase 8 raises this and adds the dead-letter hop. */
-  attempts?: number;
-  /** Base delay for exponential backoff between attempts, in ms. */
-  backoffMs?: number;
-  /** How many completed/failed jobs BullMQ keeps for inspection. */
-  keepCompleted?: number;
-  keepFailed?: number;
-};
-
-let config: QueueConfig | null = null;
 let queue: Queue<DeploymentJob> | null = null;
 let queueConnection: Redis | null = null;
-/**
- * Connections handed to BullMQ Workers/QueueEvents. BullMQ does not close a
- * connection it did not create, so we keep them here and close them in
- * `closeQueue()` — otherwise a worker's graceful shutdown leaks a socket.
- */
-const borrowedConnections = new Set<Redis>();
-
-export function configureQueue(next: QueueConfig): void {
-  config = next;
-}
-
-function requireConfig(): QueueConfig {
-  if (!config) {
-    throw new Error('@forge/queue is not configured — call configureQueue({ redisUrl }) at boot');
-  }
-  return config;
-}
-
-class QueueTimeoutError extends Error {
-  constructor(operation: string, ms: number) {
-    super(`Queue operation "${operation}" did not complete within ${ms}ms`);
-    this.name = 'QueueTimeoutError';
-  }
-}
-
-/** Bounds one queue command; see `operationTimeoutMs` above. */
-async function withDeadline<T>(operation: string, work: Promise<T>): Promise<T> {
-  const ms = config?.operationTimeoutMs ?? 5_000;
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new QueueTimeoutError(operation, ms)), ms);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-function defaultJobOptions(cfg: QueueConfig): JobsOptions {
-  return {
-    attempts: cfg.attempts ?? 1,
-    backoff: { type: 'exponential', delay: cfg.backoffMs ?? 5_000 },
-    // Keep a bounded history so the dashboard/queue stats stay meaningful
-    // without Redis growing forever.
-    removeOnComplete: { count: cfg.keepCompleted ?? 200 },
-    removeOnFail: { count: cfg.keepFailed ?? 500 },
-  };
-}
 
 /** Process-wide producer handle. Created lazily; the API opens it at boot. */
 export function getDeploymentsQueue(): Queue<DeploymentJob> {
@@ -122,6 +52,22 @@ export async function enqueueDeployment(
   );
 }
 
+/**
+ * Where a deployment's job currently sits in BullMQ, or null if the queue has
+ * no record of it at all.
+ *
+ * Read by Phase 10's orphan sweep, and the reason it exists is to keep the
+ * sweep out of BullMQ's way: a job still `active`, `waiting` or `delayed` is
+ * one the queue is going to re-deliver on its own, and failing its deployment
+ * from the outside would race that recovery. Only a deployment whose job is
+ * genuinely gone (or already `failed`) is the sweep's business.
+ */
+export async function getDeploymentJobState(deploymentId: string): Promise<string | null> {
+  const job = await withDeadline('getJob', getDeploymentsQueue().getJob(deploymentId));
+  if (!job) return null;
+  return withDeadline('getState', job.getState());
+}
+
 /** Removes a finished job's record so its id can be reused by a retry. */
 export async function forgetDeploymentJob(deploymentId: string): Promise<void> {
   const existing = await withDeadline('getJob', getDeploymentsQueue().getJob(deploymentId));
@@ -149,8 +95,23 @@ export async function getQueueStats(): Promise<QueueStats> {
 export type DeploymentWorkerOptions = {
   concurrency: number;
   processor: Processor<DeploymentJob, void, string>;
-  /** Seconds before an unreported job is considered stalled and re-queued. */
+  /** How long a job's lock lives without renewal before it counts as stalled. */
   lockDurationMs?: number;
+  /**
+   * How often this worker scans for jobs whose lock has lapsed (Phase 10).
+   *
+   * Every worker runs the scan, and BullMQ's own Redis lock makes sure only one
+   * of them acts on a given tick — which is the point: the process that
+   * recovers a crashed worker's job must not be the crashed worker.
+   */
+  stalledIntervalMs?: number;
+  /**
+   * How many times one job may be recovered from a stall before BullMQ fails
+   * it outright. A stall does not consume a retry attempt, so without a
+   * ceiling a job that reliably kills its worker would work through the whole
+   * fleet, one process at a time.
+   */
+  maxStalledCount?: number;
 };
 
 /**
@@ -161,11 +122,13 @@ export type DeploymentWorkerOptions = {
 export function createDeploymentWorker(options: DeploymentWorkerOptions): Worker<DeploymentJob> {
   const cfg = requireConfig();
   const connection = createRedis(cfg.redisUrl, 'bullmq');
-  borrowedConnections.add(connection);
+  trackBorrowed(connection);
   return new Worker<DeploymentJob, void, string>(QUEUE_NAMES.deployments, options.processor, {
     connection,
     concurrency: options.concurrency,
-    lockDuration: options.lockDurationMs ?? 60_000,
+    lockDuration: options.lockDurationMs ?? 30_000,
+    stalledInterval: options.stalledIntervalMs ?? 15_000,
+    maxStalledCount: options.maxStalledCount ?? 2,
     // Never auto-run jobs before the process has finished registering itself.
     autorun: false,
   });
@@ -175,22 +138,15 @@ export function createDeploymentWorker(options: DeploymentWorkerOptions): Worker
 export function createDeploymentQueueEvents(): QueueEvents {
   const cfg = requireConfig();
   const connection = createRedis(cfg.redisUrl, 'bullmq');
-  borrowedConnections.add(connection);
+  trackBorrowed(connection);
   return new QueueEvents(QUEUE_NAMES.deployments, { connection });
 }
 
-export { QueueTimeoutError };
-
-export async function closeQueue(): Promise<void> {
+export async function closeDeploymentsQueue(): Promise<void> {
   const current = queue;
   const connection = queueConnection;
-  const borrowed = [...borrowedConnections];
   queue = null;
   queueConnection = null;
-  borrowedConnections.clear();
   if (current) await current.close();
-  await Promise.allSettled([
-    closeRedis(connection),
-    ...borrowed.map((client) => closeRedis(client)),
-  ]);
+  await closeRedis(connection);
 }

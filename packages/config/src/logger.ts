@@ -34,8 +34,16 @@ const baseOptions: LoggerOptions = {
       }),
 };
 
+/**
+ * `service` always wins, but anything else a caller puts in `base` is kept.
+ *
+ * The previous version overwrote `base` wholesale, so every caller that passed
+ * `base: { service, pid }` silently lost the pid — which only became visible in
+ * Phase 10, where several processes of the same role log to one terminal and
+ * the pid is how you tell them apart.
+ */
 export function createLogger(service: string, options: LoggerOptions = {}): Logger {
-  return pino({ ...baseOptions, ...options, base: { service } });
+  return pino({ ...baseOptions, ...options, base: { ...options.base, service } });
 }
 
 export type { Logger };

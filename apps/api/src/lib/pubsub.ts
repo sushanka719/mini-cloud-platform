@@ -75,13 +75,33 @@ function getSubscriber(): Redis {
   return client;
 }
 
+/**
+ * Removes a channel's registry entry — but only if it is still *this* state.
+ *
+ * The guard is not defensive dressing; without it the registry loses channels
+ * that are genuinely subscribed. A release captured against an old state
+ * object runs after a new subscriber has already installed a fresh one for the
+ * same channel, and an unguarded `channels.delete(channel)` then evicts the
+ * live entry. The Redis SUBSCRIBE survives (nothing unsubscribed it), so the
+ * failure is invisible: `subscriber.on('message')` looks the channel up, finds
+ * nothing, and drops every frame in silence.
+ *
+ * Found the hard way in Phase 9 — the `metrics` topic reported itself
+ * subscribed, the samples were plainly being published, and no frame ever
+ * reached a browser. The tell was the gateway's own counters: two topics held,
+ * one Pub/Sub channel registered.
+ */
+function forget(channel: string, state: ChannelState): void {
+  if (channels.get(channel) === state) channels.delete(channel);
+}
+
 function reconcile(channel: string, state: ChannelState): Promise<void> {
   const task = async (): Promise<void> => {
     // Read intent at execution time, not enqueue time: a subscribe that raced
     // with an unsubscribe collapses to a no-op instead of thrashing Redis.
     const wanted = state.handlers.size > 0;
     if (wanted === state.subscribed) {
-      if (!wanted) channels.delete(channel);
+      if (!wanted) forget(channel, state);
       return;
     }
     if (wanted) {
@@ -92,7 +112,7 @@ function reconcile(channel: string, state: ChannelState): Promise<void> {
     }
     await getSubscriber().unsubscribe(channel);
     state.subscribed = false;
-    channels.delete(channel);
+    forget(channel, state);
     log.debug({ channel }, 'unsubscribed');
   };
 
@@ -117,9 +137,23 @@ export async function subscribeChannel(
   let state = channels.get(channel);
   if (!state) {
     state = { handlers: new Set(), subscribed: false, pending: Promise.resolve() };
-    channels.set(channel, state);
   }
+  /**
+   * Add the handler *before* re-asserting the registry entry, and re-assert it
+   * unconditionally.
+   *
+   * Both halves matter, because a pending unsubscribe task for this channel
+   * may run at any point in here:
+   *  - it reads `handlers.size` at execution time, so adding first makes it
+   *    see the new listener and collapse to a no-op instead of unsubscribing;
+   *  - if it ran *before* the add and removed the entry, the `set` below puts
+   *    the state we are about to subscribe with back in the registry — which
+   *    is the map `on('message')` looks frames up in.
+   * A `set` of a state that is already there is a no-op, so the common path
+   * costs nothing.
+   */
   state.handlers.add(handler);
+  channels.set(channel, state);
 
   const current = state;
   try {

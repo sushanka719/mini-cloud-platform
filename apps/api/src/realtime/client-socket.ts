@@ -348,6 +348,10 @@ export class ClientSocket {
     // Never forward an unvalidated payload to a client: the frame shape is a
     // published contract, and anything on the channel could have been written
     // by an older process.
+    //
+    // The global `metrics` channel carries nothing but metric samples, so it
+    // is checked against that one schema and anything else is dropped in
+    // silence — a stray publish there is not worth a log line per tick.
     if (sub.topic.kind === 'metrics') {
       const metric = metricMessageSchema.safeParse(json);
       if (!metric.success) return;
@@ -355,18 +359,42 @@ export class ClientSocket {
       return;
     }
 
+    /**
+     * A tenant channel (`deployment:`/`project:`/`org:`) carries *two* kinds
+     * of frame: pipeline events, and — since Phase 9 — the container CPU and
+     * memory samples the worker's monitor publishes.
+     *
+     * The container samples ride these channels rather than the global
+     * `metrics` one precisely because these are the channels whose
+     * subscriptions are authorized per tenant; `metrics` is readable by any
+     * authenticated member. So both shapes are accepted here, tried in
+     * frequency order — log lines vastly outnumber metric samples.
+     */
     const message = deploymentMessageSchema.safeParse(json);
-    if (!message.success) {
-      this.log.warn({ topic: sub.topic.name }, 'pubsub payload failed validation');
+    if (message.success) {
+      this.deliver(sub, { ...message.data, topic: sub.topic.name });
       return;
     }
-    this.deliver(sub, { ...message.data, topic: sub.topic.name });
+
+    const metric = metricMessageSchema.safeParse(json);
+    if (metric.success) {
+      this.deliver(sub, { ...metric.data, topic: sub.topic.name });
+      return;
+    }
+
+    this.log.warn({ topic: sub.topic.name }, 'pubsub payload failed validation');
   }
 
   private deliver(sub: Subscription, frame: DataFrame): void {
     if (sub.replaying) {
       if (sub.pending.length >= MAX_PENDING_FRAMES) {
+        // Same accounting as the slow-consumer path: count the drop *and*
+        // schedule the notice. Counting without scheduling left the client
+        // silently short of frames until some later drop happened to send the
+        // notice — and if none ever did, never told at all.
         this.droppedFrames += 1;
+        this.dropTopic = frame.topic;
+        this.scheduleDropNotice();
         return;
       }
       sub.pending.push(frame);

@@ -49,13 +49,36 @@ export async function setWorkerStatus(workerId: string, status: WorkerStatus): P
   await getDb().updateTable('workers').set({ status }).where('id', '=', workerId).execute();
 }
 
-export async function listWorkers(limit = 50): Promise<WorkerRow[]> {
-  return getDb()
-    .selectFrom('workers')
-    .selectAll()
-    .orderBy('last_heartbeat_at', 'desc')
-    .limit(limit)
-    .execute();
+/**
+ * The fleet view's worker list: **recently seen** workers, not every worker
+ * that ever registered.
+ *
+ * A row per process run is the right history — that is how "which worker ran
+ * which deployment" stays answerable months later — but it makes an unfiltered
+ * list useless as a live view. Ten phases of development on one laptop had
+ * accumulated 38 rows, all but one of them a long-dead process, and the one
+ * online worker was somewhere in the middle of them.
+ *
+ * `seenWithinMs` is a Postgres-side filter on `last_heartbeat_at`, which is
+ * safe for the liveness question even though liveness itself lives in Redis: an
+ * online worker writes that column every `WORKER_HEARTBEAT_MS` (5s by default),
+ * so any window measured in minutes includes every live worker with room to
+ * spare. The history is untouched — this narrows a read, not the table.
+ */
+export async function listWorkers(
+  options: { limit?: number; seenWithinMs?: number } = {},
+): Promise<WorkerRow[]> {
+  const limit = options.limit ?? 50;
+  let query = getDb().selectFrom('workers').selectAll();
+  if (options.seenWithinMs !== undefined) {
+    const seconds = Math.floor(options.seenWithinMs / 1000);
+    query = query.where(
+      'last_heartbeat_at',
+      '>',
+      sql<Date>`now() - make_interval(secs => ${seconds})`,
+    );
+  }
+  return query.orderBy('last_heartbeat_at', 'desc').limit(limit).execute();
 }
 
 /**

@@ -29,15 +29,21 @@ forgecloud/
 ├── apps/
 │   ├── api/          # Fastify HTTP + WebSocket API
 │   ├── worker/       # Deployment worker (BullMQ consumer)
+│   ├── proxy/        # hand-written reverse proxy in front of the API replicas
 │   └── dashboard/    # Next.js dashboard
 ├── packages/
 │   ├── db/           # Kysely client, types, migrations, shared repositories
 │   ├── queue/        # Redis connection factory + BullMQ queue/job definitions
 │   ├── storage/      # local object store, streamed IO, gzip on worker threads
+│   ├── metrics/      # process sampling (perf_hooks) + Prometheus rendering
 │   ├── shared/       # Zod schemas, domain types, WS event contracts, constants
 │   └── config/       # env parsing (Zod) + logger factory
+├── examples/
+│   └── hello-forge/  # zero-dependency sample app to deploy through ForgeCloud
 ├── infra/
 │   └── docker-compose.yml
+├── scripts/
+│   └── cluster.mjs   # runs N api replicas + M workers + the proxy, with kill/stop/start
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── CONVENTIONS.md
@@ -58,6 +64,17 @@ pnpm --filter @forge/db migrate up   # run migrations
 pnpm dev                             # runs api (:4000) + worker + dashboard (:3000)
 ```
 
+Then deploy something. Pack the sample app, upload it in the project's **Source** panel and hit
+**Deploy** — the worker unpacks it into a sandbox, runs `npm install` and `npm run build` under
+`spawn(shell:false)`, and streams the real output to the browser:
+
+```bash
+tar -czf /tmp/hello-forge.tgz -C examples hello-forge   # or: (cd examples && zip -qr /tmp/hello-forge.zip hello-forge)
+```
+
+Builds run under `BUILD_ROOT` (`./builds` by default), one sandbox per deployment attempt, removed
+when it finishes. See [examples/README.md](./examples/README.md).
+
 Then open the dashboard at http://localhost:3000 — the health panel should show Postgres and
 Redis green. (Container host ports are 5433/6380 so they don't collide with a locally installed
 Postgres/Redis on the default ports.)
@@ -68,13 +85,41 @@ Postgres/Redis on the default ports.)
 | API | http://localhost:4000 |
 | API health | http://localhost:4000/health |
 
-Run a second worker to watch two of them compete for the same queue:
+## Running a fleet
+
+`pnpm dev` is one API and one worker. To run the horizontally-scaled version — several API replicas
+behind the reverse proxy, several workers competing for the same queue:
 
 ```bash
-WORKER_NAME=worker-2 pnpm --filter @forge/worker dev
+pnpm cluster                    # 2 api replicas + 2 workers + proxy (:4100) + dashboard (:3000)
+pnpm cluster --api 3 --workers 3
 ```
 
-The **Fleet** page in the dashboard shows queue depth and every registered worker.
+The dashboard is pointed at the proxy, so it talks to one address and has no idea how many API
+processes are behind it. Sessions are opaque tokens in Redis, so there is no sticky routing.
+
+`pnpm cluster` reads commands on stdin while it runs:
+
+| Command | What it does |
+|---|---|
+| `list` | every process, with pids |
+| `kill worker-2` | **SIGKILL** — the crash demo. Nothing is recorded; the heartbeat key expires on its own, BullMQ returns the job to the queue when its lock lapses (~30–45s), and another worker takes the deployment over and starts it again. Watch the timeline say so. |
+| `stop worker-2` | **SIGTERM** — the graceful-shutdown demo. The worker drains: it stops taking jobs, aborts its builds, records them as failed, and the retry lands elsewhere within seconds. |
+| `start worker-2` | bring a stopped one back |
+| `quit` | SIGTERM everything and exit |
+
+The same works for `api-1` — kill a replica and the proxy drops it from rotation on the failed
+request itself, retrying that request on a survivor, so the browser sees no error.
+
+The **Fleet** page in the dashboard shows all of it: the proxy's request split and which replica
+served your last request, a card per API replica (marking the one holding your WebSocket), queue
+depth, every worker with its build history, and the dead-letter queue.
+
+| Service | URL |
+|---|---|
+| Proxy | http://localhost:4100 |
+| Proxy status | http://localhost:4100/__forge/proxy |
+| API replicas | http://localhost:4001, :4002, … |
 
 ## Documentation
 

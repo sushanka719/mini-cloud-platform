@@ -53,9 +53,22 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     };
   }, [client, isLoading, userId]);
 
+  /**
+   * `subscribe` is bound once per client, not per render.
+   *
+   * It used to be re-bound inside the context value, whose identity changes
+   * whenever `instance` does — and `instance` is only known once the `hello`
+   * frame lands, a moment *after* the socket opens. Every `useTopic` effect
+   * therefore tore its subscription down and rebuilt it a beat after
+   * connecting: harmless-looking, but it replayed a deployment's whole event
+   * history twice and drove the subscribe/unsubscribe race the gateway's
+   * Pub/Sub registry then had to be hardened against.
+   */
+  const subscribe = useMemo(() => client.subscribe.bind(client), [client]);
+
   const value = useMemo<RealtimeContextValue>(
-    () => ({ status, instance, subscribe: client.subscribe.bind(client) }),
-    [status, instance, client],
+    () => ({ status, instance, subscribe }),
+    [status, instance, subscribe],
   );
 
   return <RealtimeContext.Provider value={value}>{children}</RealtimeContext.Provider>;

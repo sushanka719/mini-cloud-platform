@@ -9,13 +9,7 @@ import {
   type StoredFile,
 } from '@forge/shared';
 import { compressionPoolStats, projectPrefix } from '@forge/storage';
-import type { FileRow, ProjectRow } from '@forge/db';
-import {
-  deleteFileRow,
-  findProjectFile,
-  listProjectFileIndex,
-  listProjectFiles,
-} from '../repositories/file-repository.js';
+import { fileRepo, type FileRow, type ProjectRow } from '@forge/db';
 import { objectStore } from '../lib/object-store.js';
 import { toStoredFile } from './serializers.js';
 
@@ -26,12 +20,12 @@ export async function getProjectFiles(
   kind?: FileKind,
   limit?: number,
 ): Promise<StoredFile[]> {
-  return (await listProjectFiles(projectId, kind, limit)).map(toStoredFile);
+  return (await fileRepo.listProjectFiles(projectId, kind, limit)).map(toStoredFile);
 }
 
 /** The single lookup, so the project scope can never be forgotten. */
 export async function requireProjectFile(projectId: string, fileId: string): Promise<FileRow> {
-  const row = await findProjectFile(projectId, fileId);
+  const row = await fileRepo.findProjectFile(projectId, fileId);
   if (!row) throw notFound('FILE_NOT_FOUND', 'File not found');
   return row;
 }
@@ -138,7 +132,7 @@ export async function deleteProjectFile(
 ): Promise<{ objectDeleted: boolean }> {
   const row = await requireProjectFile(project.id, fileId);
   const objectDeleted = await objectStore.delete(row.storage_path);
-  await deleteFileRow(project.id, fileId);
+  await fileRepo.deleteFileRow(project.id, fileId);
   return { objectDeleted };
 }
 
@@ -152,7 +146,7 @@ export async function getStorageUsage(project: ProjectRow): Promise<StorageUsage
   const prefix = projectPrefix(project.org_id, project.id);
   const [objects, rows] = await Promise.all([
     objectStore.list(prefix),
-    listProjectFileIndex(project.id),
+    fileRepo.listProjectFileIndex(project.id),
   ]);
 
   const byPath = new Map(rows.map((row) => [row.storage_path, row]));

@@ -14,13 +14,19 @@
   "dependencies": {
     "@forge/config": "workspace:*",
     "@forge/db": "workspace:*",
+    "@forge/metrics": "workspace:*",
     "@forge/queue": "workspace:*",
     "@forge/shared": "workspace:*",
     "@forge/storage": "workspace:*",
-    "ioredis": "^5.8.1"
+    "dockerode": "^4.0.12",
+    "ioredis": "^5.8.1",
+    "tar": "^7.5.22",
+    "yauzl": "^3.4.0"
   },
   "devDependencies": {
+    "@types/dockerode": "^3.3.47",
     "@types/node": "^20.19.9",
+    "@types/yauzl": "^3.4.0",
     "tsx": "^4.20.6"
   }
 }

@@ -4,13 +4,20 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   api,
+  downloadUrl,
   formatAgo,
+  formatBytes,
   formatDuration,
   isSettled,
+  ROLLBACK_SKIPPED_STAGES,
   TERMINAL_STATUSES,
+  type ContainerActionResult,
   type Deployment,
   type DeploymentEvent,
   type DeploymentStatus,
+  type RetryResult,
+  type RollbackTarget,
+  type StoredFile,
 } from '@/lib/api';
 import { frameToEvent, topics, type WsErrorFrame } from '@/lib/realtime';
 import { useRealtime, useTopic } from '@/components/realtime-provider';
@@ -32,11 +39,15 @@ export function DeploymentsPanel({
   orgSlug,
   projectId,
   canDeploy,
+  healthPath,
 }: {
   orgSlug: string;
   projectId: string;
   canDeploy: boolean;
+  /** So the "open the app" link lands on the path the health check proved. */
+  healthPath: string;
 }) {
+  const liveHealthPath = healthPath;
   const queryClient = useQueryClient();
   const { status: socketStatus } = useRealtime();
   const socketLive = socketStatus === 'open';
@@ -116,6 +127,11 @@ export function DeploymentsPanel({
         if (frame.status === 'live') {
           void queryClient.invalidateQueries({ queryKey: ['project', projectId] });
         }
+        // A deployment leaving service is what *creates* a rollback target, so
+        // the list is re-read on exactly those transitions rather than polled.
+        if (frame.status === 'stopped' || frame.status === 'rolled_back') {
+          void queryClient.invalidateQueries({ queryKey: ['rollback-targets', projectId] });
+        }
       },
       [queryClient, projectId, refreshDeployment],
     ),
@@ -124,9 +140,26 @@ export function DeploymentsPanel({
   const list = deployments.data ?? [];
   const selected = list.find((d) => d.id === selectedId) ?? list[0] ?? null;
   const { events: timeline, notice } = useDeploymentTimeline(orgSlug, projectId, selected);
+  const files = useDeploymentFiles(orgSlug, projectId, selected);
   // Where a failed deployment stopped — read off the timeline we already have
   // rather than asking the server a second time.
   const failurePoint = lastPipelineStage(timeline);
+
+  /**
+   * Which stages this deployment skipped, if it is a rollback.
+   *
+   * Read off the timeline rather than sent by the server: a `cloning` event
+   * means the image had been pruned and the artifact was extracted, so only
+   * install and build were skipped. No `cloning` event means the image was
+   * reused and clone/install/build were all skipped. The timeline is already
+   * loaded, and it is the authoritative record of what actually ran.
+   */
+  const isRollback = selected !== null && selected.parentDeploymentId !== null;
+  const rollbackSkipped = !isRollback
+    ? undefined
+    : timeline.some((event) => event.type === 'status' && event.status === 'cloning')
+      ? ROLLBACK_SKIPPED_STAGES.artifact
+      : ROLLBACK_SKIPPED_STAGES.image;
 
   const deploy = useMutation({
     mutationFn: async () => {
@@ -168,10 +201,66 @@ export function DeploymentsPanel({
     },
   });
 
+  /**
+   * Stop / restart the selected deployment's container.
+   *
+   * The API only enqueues (it may not call Docker), so nothing is optimistic
+   * here: the row changes when a worker has actually done it, and the project
+   * topic above is what tells this component.
+   */
+  const containerAction = useMutation({
+    mutationFn: (action: 'stop' | 'restart') =>
+      api.post<ContainerActionResult>(`${base}/${selected?.id ?? ''}/${action}`, {}),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['containers', orgSlug] });
+    },
+  });
+
+  /**
+   * Re-run a failed deployment on the same row.
+   *
+   * Nothing optimistic: the API re-queues the row and a worker picks it up, so
+   * the status the user is waiting for arrives on the project topic like every
+   * other transition. `enqueued: false` comes back as a message, not an error —
+   * "already in flight" is a satisfied request, not a failed one.
+   */
+  const retry = useMutation({
+    mutationFn: () => api.post<RetryResult>(`${base}/${selected?.id ?? ''}/retry`, {}),
+    onSuccess: (result) => {
+      setReplayNote(null);
+      refreshDeployment(result.deploymentId);
+    },
+  });
+
+  /** Deployments this project can be returned to — served once, not now. */
+  const rollbackTargets = useQuery({
+    queryKey: ['rollback-targets', projectId],
+    queryFn: () =>
+      api.get<RollbackTarget[]>(
+        `/orgs/${orgSlug}/projects/${projectId}/rollback-targets?limit=10`,
+      ),
+  });
+
+  const rollback = useMutation({
+    mutationFn: (targetId: string) =>
+      api.post<Deployment>(`${base}/${targetId}/rollback`, {
+        // A fresh key per click, exactly like Deploy: two clicks are two
+        // rollbacks, a browser-retried request is one.
+        idempotencyKey: `rb-${crypto.randomUUID()}`,
+      }),
+    onSuccess: (created) => {
+      setSelectedId(created.id);
+      setReplayNote(
+        `Rolling back to ${created.parentDeploymentId?.slice(0, 8) ?? '?'} as deployment ${created.id.slice(0, 8)}.`,
+      );
+      void queryClient.invalidateQueries({ queryKey: ['deployments', projectId] });
+    },
+  });
+
   return (
     <Panel
       title="Deployments"
-      description="Deploy enqueues a job; a worker claims it and walks the pipeline. Status and logs stream over the WebSocket."
+      description="Deploy enqueues a job; a worker unpacks the source, runs install and build, builds a Docker image, starts a container with resource limits and health-checks it. Every line of output streams here over the WebSocket."
       actions={
         canDeploy ? (
           <div className="flex items-center gap-2">
@@ -226,31 +315,139 @@ export function DeploymentsPanel({
       {selected && (
         <div className="mb-5 rounded-xl border border-[#232734] bg-[#0d0f16] p-4">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <StatusBadge status={selected.status} />
               <span className="font-mono text-xs text-[#6e7387]">{selected.id.slice(0, 8)}</span>
               {selected.attempt > 1 && (
-                <span className="text-xs text-amber-300">attempt {selected.attempt}</span>
+                <span
+                  className="text-xs text-amber-300"
+                  title="Each attempt is a full run of this deployment — automatic retries and clicked ones both count"
+                >
+                  attempt {selected.attempt} of {selected.maxAttempts}
+                </span>
+              )}
+              {isRollback && selected.parentDeploymentId && (
+                <span
+                  className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 font-mono text-[11px] text-amber-300"
+                  title="This deployment was created by rolling back"
+                >
+                  ↩ {selected.parentDeploymentId.slice(0, 8)}
+                </span>
+              )}
+              {selected.deadLetteredAt && (
+                <span
+                  className="rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-[11px] text-red-300"
+                  title={`Parked in the dead-letter queue at ${new Date(selected.deadLetteredAt).toLocaleString()}`}
+                >
+                  dead-lettered
+                </span>
               )}
             </div>
             <span className="text-xs text-[#6e7387]">
               {formatDuration(selected.durationMs)} · queued {formatAgo(selected.queuedAt)}
             </span>
           </div>
-          <DeploymentPipeline status={selected.status} failedAfter={failurePoint} />
-          {selected.errorCode && (
-            <p className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
-              <span className="font-mono uppercase">{selected.errorCode}</span> —{' '}
-              {selected.errorMessage}
+          <DeploymentPipeline
+            status={selected.status}
+            failedAfter={failurePoint}
+            skipped={rollbackSkipped}
+          />
+
+          {selected.status === 'live' && selected.url && (
+            <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2.5">
+              <a
+                href={`${selected.url}${liveHealthPath}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-sm font-medium text-emerald-300 underline decoration-dotted hover:text-emerald-200"
+              >
+                {selected.url} ↗
+              </a>
+              <span className="font-mono text-[11px] text-emerald-400/70">
+                {selected.containerId?.slice(0, 12)}
+                {selected.hostPort !== null && ` · host port ${String(selected.hostPort)}`}
+              </span>
+              {canDeploy && (
+                <span className="ml-auto flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    className="text-xs"
+                    disabled={containerAction.isPending}
+                    title="Bounce the container and re-run the health check"
+                    onClick={() => containerAction.mutate('restart')}
+                  >
+                    Restart
+                  </Button>
+                  <Button
+                    variant="danger"
+                    className="text-xs"
+                    disabled={containerAction.isPending}
+                    title="Remove the container; the image is kept"
+                    onClick={() => containerAction.mutate('stop')}
+                  >
+                    Stop
+                  </Button>
+                </span>
+              )}
+            </div>
+          )}
+          <ErrorNote error={containerAction.error} />
+          {containerAction.data && (
+            <p className="mt-2 text-xs text-[#8b90a3]">{containerAction.data.message}</p>
+          )}
+
+          {selected.imageTag && selected.status !== 'live' && (
+            <p className="mt-3 font-mono text-[11px] text-[#6e7387]">
+              image {selected.imageTag}
+              {selected.containerId && ` · container ${selected.containerId.slice(0, 12)}`}
             </p>
+          )}
+
+          {selected.errorCode && (
+            <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2.5">
+              <p className="text-xs text-red-300">
+                <span className="font-mono uppercase">{selected.errorCode}</span> —{' '}
+                {selected.errorMessage}
+              </p>
+              {canDeploy && selected.status === 'failed' && (
+                <Button
+                  variant="secondary"
+                  className="ml-auto text-xs"
+                  disabled={retry.isPending}
+                  title="Run this deployment again on the same row; the attempt counter goes up"
+                  onClick={() => retry.mutate()}
+                >
+                  {retry.isPending ? 'Queueing…' : 'Retry'}
+                </Button>
+              )}
+            </div>
+          )}
+          <ErrorNote error={retry.error} />
+          {retry.data && !retry.data.enqueued && (
+            <p className="mt-2 text-xs text-amber-300">{retry.data.message}</p>
           )}
           {notice && (
             <p className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
               {notice}
             </p>
           )}
-          <DeploymentTimeline events={timeline} />
+          <DeploymentTimeline
+            events={timeline}
+            logFile={files.log}
+            artifact={files.artifact}
+            orgSlug={orgSlug}
+            projectId={projectId}
+          />
         </div>
+      )}
+
+      {canDeploy && (rollbackTargets.data ?? []).length > 0 && (
+        <RollbackPanel
+          targets={rollbackTargets.data ?? []}
+          pending={rollback.isPending}
+          error={rollback.error}
+          onRollback={(targetId) => rollback.mutate(targetId)}
+        />
       )}
 
       {deployments.isPending ? (
@@ -274,8 +471,24 @@ export function DeploymentsPanel({
                 <span className="text-xs text-[#8b90a3]">
                   {formatDuration(deployment.durationMs)}
                 </span>
+                {deployment.attempt > 1 && (
+                  <span className="text-[11px] text-amber-300">×{deployment.attempt}</span>
+                )}
+                {deployment.parentDeploymentId && (
+                  <span
+                    className="font-mono text-[11px] text-amber-300/80"
+                    title={`Rolled back to ${deployment.parentDeploymentId.slice(0, 8)}`}
+                  >
+                    ↩ {deployment.parentDeploymentId.slice(0, 8)}
+                  </span>
+                )}
                 {deployment.errorCode && (
                   <span className="font-mono text-[11px] text-red-300">{deployment.errorCode}</span>
+                )}
+                {deployment.deadLetteredAt && (
+                  <span className="text-[11px] text-red-400/80" title="In the dead-letter queue">
+                    DLQ
+                  </span>
                 )}
                 <span className="ml-auto text-xs text-[#6e7387]">
                   {formatAgo(deployment.queuedAt)}
@@ -289,10 +502,154 @@ export function DeploymentsPanel({
   );
 }
 
-/** The append-only timeline, auto-scrolled as lines stream in. */
-function DeploymentTimeline({ events }: { events: DeploymentEvent[] }) {
+/**
+ * "Roll back to" — the project's previous deployments, newest first.
+ *
+ * Every row is a deployment that went live and has since been replaced. Rolling
+ * back to one creates a *new* deployment from its image (or, if that image has
+ * been pruned, from its stored artifact), health-checks it, and swaps it in —
+ * so the thing being rolled back to is never mutated and the deployment being
+ * replaced is recorded as `rolled_back` rather than merely stopped.
+ *
+ * `hasImage` is what the server *recorded*, not what Docker still holds: the
+ * API cannot ask the Docker host, so a row can say "image" and the worker can
+ * still find it pruned and fall back to the artifact. Showing both is the
+ * honest version, and it explains why one rollback takes two seconds and
+ * another rebuilds.
+ */
+function RollbackPanel({
+  targets,
+  pending,
+  error,
+  onRollback,
+}: {
+  targets: RollbackTarget[];
+  pending: boolean;
+  error: unknown;
+  onRollback: (targetId: string) => void;
+}) {
+  return (
+    <div className="mb-5 rounded-xl border border-amber-500/25 bg-amber-500/[0.04] p-4">
+      <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-sm font-semibold text-amber-200">Roll back</h3>
+        <p className="text-[11px] text-[#8b90a3]">
+          Creates a new deployment from a previous one’s image — no clone, no install, no build.
+        </p>
+      </div>
+      <ErrorNote error={error} />
+      <ul className="divide-y divide-[#1c202b]">
+        {targets.map((target) => {
+          const usable = target.hasImage || target.hasArtifact;
+          return (
+            <li
+              key={target.deploymentId}
+              className="flex flex-wrap items-center gap-3 py-2.5 text-xs"
+            >
+              <StatusBadge status={target.status} />
+              <span className="font-mono text-[#8b90a3]">
+                {target.deploymentId.slice(0, 8)}
+              </span>
+              {target.attempt > 1 && (
+                <span className="text-[11px] text-[#6e7387]">attempt {target.attempt}</span>
+              )}
+              <span className="flex items-center gap-1.5 text-[11px]">
+                {target.hasImage ? (
+                  <span
+                    className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300"
+                    title={target.imageTag ?? undefined}
+                  >
+                    image
+                  </span>
+                ) : null}
+                {target.hasArtifact ? (
+                  <span
+                    className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-sky-300"
+                    title="The gzipped tree that was built into the image; the rollback rebuilds from it if the image is gone"
+                  >
+                    artifact {target.artifactBytes === null ? '' : formatBytes(target.artifactBytes)}
+                  </span>
+                ) : null}
+                {!usable && (
+                  <span className="text-[#6e7387]">neither an image nor an artifact remains</span>
+                )}
+              </span>
+              <span className="ml-auto flex items-center gap-3">
+                {target.liveAt && (
+                  <span className="text-[11px] text-[#6e7387]">
+                    was live {formatAgo(target.liveAt)}
+                  </span>
+                )}
+                <Button
+                  variant="secondary"
+                  className="text-xs"
+                  disabled={pending || !usable}
+                  title={
+                    usable
+                      ? 'Deploy this version again and swap it in'
+                      : 'Nothing left to roll back to: the image was pruned and no artifact was kept'
+                  }
+                  onClick={() => onRollback(target.deploymentId)}
+                >
+                  Roll back
+                </Button>
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * How many rows the log box keeps in the DOM.
+ *
+ * A real build can stream thousands of lines, and every one of them is a node
+ * the browser has to lay out — past a few thousand, scrolling the box costs
+ * more than producing the lines did. The tail is what anyone is reading; the
+ * whole thing is one click away as the stored log object.
+ */
+const MAX_RENDERED_LINES = 2_000;
+
+/** Per-stream colours: stderr has to be findable without reading every line. */
+const STREAM_STYLE: Record<string, { label: string; tag: string; text: string }> = {
+  stdout: { label: 'out', tag: 'text-[#4a4f61]', text: 'text-[#b6bbcc]' },
+  stderr: { label: 'err', tag: 'text-amber-400/80', text: 'text-amber-200/90' },
+  system: { label: '···', tag: 'text-sky-400/70', text: 'text-sky-200/80' },
+};
+
+/**
+ * Log timestamps are 24-hour and built once: `toLocaleTimeString()` defaults to
+ * a 12-hour clock in most locales, and the trailing " AM" wraps the timestamp
+ * column onto a second line, which knocks every row out of alignment.
+ */
+const CLOCK = new Intl.DateTimeFormat(undefined, {
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+
+/**
+ * The append-only timeline: pipeline transitions and real build output in one
+ * scrolling view, auto-followed as lines stream in.
+ */
+function DeploymentTimeline({
+  events,
+  logFile,
+  artifact,
+  orgSlug,
+  projectId,
+}: {
+  events: DeploymentEvent[];
+  logFile: StoredFile | null;
+  artifact: StoredFile | null;
+  orgSlug: string;
+  projectId: string;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const [follow, setFollow] = useState(true);
 
   // Follow the tail, but stop following once the reader scrolls up to look at
   // something — yanking them back to the bottom on every new line is worse
@@ -304,44 +661,126 @@ function DeploymentTimeline({ events }: { events: DeploymentEvent[] }) {
 
   if (events.length === 0) return null;
 
+  const hidden = Math.max(0, events.length - MAX_RENDERED_LINES);
+  const rendered = hidden > 0 ? events.slice(hidden) : events;
+
   return (
-    <div
-      ref={box}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-      }}
-      className="mt-4 max-h-72 overflow-y-auto rounded-lg border border-[#1c202b] bg-[#08090d] p-3 font-mono text-[11px] leading-relaxed"
-    >
-      {events.map((event) => (
-        <div key={event.id} className="flex gap-3">
-          <span className="shrink-0 text-[#4a4f61]">
-            {new Date(event.createdAt).toLocaleTimeString()}
-          </span>
-          <span
-            className={`shrink-0 ${
-              event.type === 'status'
-                ? event.status === 'failed'
-                  ? 'text-red-400'
-                  : 'text-sky-400'
-                : 'text-[#6e7387]'
-            }`}
-          >
-            {event.type === 'status' ? event.status : event.stream}
-          </span>
-          <span
-            className={
-              event.type === 'status' && event.status === 'failed'
-                ? 'text-red-300'
-                : 'text-[#b6bbcc]'
-            }
-          >
-            {event.message}
-          </span>
-        </div>
-      ))}
+    <div className="mt-4">
+      <div className="mb-1.5 flex flex-wrap items-center gap-3 text-[11px] text-[#6e7387]">
+        <span className="font-mono">
+          {events.length.toLocaleString()} lines
+          {hidden > 0 && ` · showing the last ${MAX_RENDERED_LINES.toLocaleString()}`}
+        </span>
+        <label className="flex items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={follow}
+            onChange={(e) => {
+              setFollow(e.target.checked);
+              pinned.current = e.target.checked;
+              if (e.target.checked && box.current) {
+                box.current.scrollTop = box.current.scrollHeight;
+              }
+            }}
+            className="accent-emerald-500"
+          />
+          Follow
+        </label>
+        <span className="ml-auto flex items-center gap-3">
+          {artifact && (
+            <a
+              href={downloadUrl(orgSlug, projectId, artifact.id)}
+              className="text-sky-400 underline decoration-dotted hover:text-sky-300"
+              title="The gzipped tree that was built into the image"
+            >
+              Artifact ({formatBytes(artifact.sizeBytes)})
+            </a>
+          )}
+          {logFile && (
+            <a
+              href={downloadUrl(orgSlug, projectId, logFile.id)}
+              className="text-emerald-400 underline decoration-dotted hover:text-emerald-300"
+            >
+              Download the full log ({formatBytes(logFile.sizeBytes)})
+            </a>
+          )}
+        </span>
+      </div>
+      <div
+        ref={box}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+          pinned.current = atBottom && follow;
+          // Scrolling up is the reader taking over; say so in the checkbox
+          // rather than silently stopping.
+          if (!atBottom && follow) setFollow(false);
+        }}
+        className="max-h-96 overflow-y-auto rounded-lg border border-[#1c202b] bg-[#08090d] p-3 font-mono text-[11px] leading-relaxed"
+      >
+        {rendered.map((event) =>
+          event.type === 'status' ? (
+            <div key={event.id} className="flex gap-3 py-0.5">
+              <span className="w-[54px] shrink-0 whitespace-nowrap text-[#4a4f61]">
+                {CLOCK.format(new Date(event.createdAt))}
+              </span>
+              <span
+                className={`shrink-0 font-semibold ${
+                  event.status === 'failed' ? 'text-red-400' : 'text-emerald-400'
+                }`}
+              >
+                {event.status}
+              </span>
+              <span className={event.status === 'failed' ? 'text-red-300' : 'text-[#8b90a3]'}>
+                {event.message}
+              </span>
+            </div>
+          ) : (
+            <div key={event.id} className="flex gap-3">
+              <span className="w-[54px] shrink-0 whitespace-nowrap text-[#33374a]">
+                {CLOCK.format(new Date(event.createdAt))}
+              </span>
+              <span className={`w-7 shrink-0 ${STREAM_STYLE[event.stream ?? 'stdout']?.tag}`}>
+                {STREAM_STYLE[event.stream ?? 'stdout']?.label}
+              </span>
+              <span
+                className={`whitespace-pre-wrap break-all ${STREAM_STYLE[event.stream ?? 'stdout']?.text}`}
+              >
+                {event.message}
+              </span>
+            </div>
+          ),
+        )}
+      </div>
     </div>
   );
+}
+
+/**
+ * Objects the selected deployment produced: its build log, and from Phase 7 the
+ * gzipped build context that became the image.
+ *
+ * Read once the deployment settles: the log object is committed at the end of
+ * the pipeline, so asking earlier would always miss.
+ */
+function useDeploymentFiles(
+  orgSlug: string,
+  projectId: string,
+  deployment: Deployment | null,
+): { log: StoredFile | null; artifact: StoredFile | null } {
+  const settled = deployment !== null && isSettled(deployment.status);
+  const files = useQuery({
+    queryKey: ['deployment-files', deployment?.id],
+    queryFn: () =>
+      api.get<StoredFile[]>(
+        `/orgs/${orgSlug}/projects/${projectId}/deployments/${deployment?.id ?? ''}/files`,
+      ),
+    enabled: settled,
+  });
+  return {
+    log: files.data?.find((file) => file.kind === 'log') ?? null,
+    artifact: files.data?.find((file) => file.kind === 'artifact') ?? null,
+  };
 }
 
 /** How long frames are batched before triggering a re-render. */

@@ -12,6 +12,7 @@ import {
   badRequest,
 } from '@forge/shared';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
+import { fileRepo } from '@forge/db';
 import {
   createProject,
   editProject,
@@ -27,7 +28,6 @@ import {
   setEnvVars,
 } from '../services/env-var-service.js';
 import { storeProjectSource } from '../services/upload-service.js';
-import { listProjectFiles } from '../repositories/file-repository.js';
 import { toStoredFile } from '../services/serializers.js';
 
 const projectParams = z.object({ orgId: z.string().min(1), projectId: z.string().uuid() });
@@ -257,7 +257,7 @@ export const projectRoutes: FastifyPluginAsyncZod = async (app) => {
     },
     async (request) => {
       const project = await requireProject(app.getOrg(request).orgId, request.params.projectId);
-      return (await listProjectFiles(project.id, 'source')).map(toStoredFile);
+      return (await fileRepo.listProjectFiles(project.id, 'source')).map(toStoredFile);
     },
   );
 };

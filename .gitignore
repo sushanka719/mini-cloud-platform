@@ -6,8 +6,8 @@ out/
 .env
 .env.*
 !.env.example
-storage/
+/storage/
+/builds/
 coverage/
 .DS_Store
 *.log
-storage/

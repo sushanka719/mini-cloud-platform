@@ -21,6 +21,47 @@ export const REDIS_KEYS = {
   /** Set of worker ids that have ever registered; heartbeat TTL decides liveness. */
   workersOnline: 'workers:online',
   deploymentLogTail: (deploymentId: string) => `deployment:${deploymentId}:logtail`,
+  /**
+   * Latest sampled stats for one running container. Ephemeral by nature — a
+   * sample is worthless a minute later — so it lives here under a TTL rather
+   * than accumulating rows in Postgres.
+   */
+  containerStats: (deploymentId: string) => `container:${deploymentId}:stats`,
+  /**
+   * Held by whichever worker is currently sampling container stats. Without it
+   * every replica would poll the Docker API for every live container on every
+   * tick, N times over, for one document.
+   */
+  containerMonitorLock: 'lock:container-monitor',
+  /**
+   * One process's latest metrics document (Phase 9).
+   *
+   * Redis under a TTL for the same reason container samples are: a CPU reading
+   * is worthless a minute later, and expiry is exactly the right rule for
+   * "this process stopped reporting". It is also what lets *any* API replica
+   * render the whole fleet's process metrics — the numbers are shared state,
+   * not process memory (CLAUDE.md §4).
+   */
+  processMetrics: (role: string, instance: string) => `metrics:process:${role}:${instance}`,
+  /**
+   * Set of `<role>:<instance>` ids that have ever reported. The document's TTL
+   * decides liveness; an id whose document is gone is pruned from here by the
+   * reader, exactly like `workersOnline`.
+   */
+  metricsProcesses: 'metrics:processes',
+  /**
+   * Held by whichever process publishes queue depth on the `metrics` topic
+   * this tick. Without it N API replicas would each publish the same three
+   * queue counters, and the dashboard would chart N× the real depth.
+   */
+  queueMetricsLock: 'lock:queue-metrics',
+  /**
+   * Held by whichever worker is sweeping abandoned deployments this tick
+   * (Phase 10). Same shape as the two leases above: N workers all reaping the
+   * same rows would each write the same failure event, and the timeline would
+   * say a deployment was lost N times.
+   */
+  orphanReaperLock: 'lock:orphan-reaper',
 } as const;
 
 /** Redis Pub/Sub channels. */
@@ -33,11 +74,31 @@ export const REDIS_CHANNELS = {
 
 export const QUEUE_NAMES = {
   deployments: 'deployments',
+  /**
+   * Where a deployment's job lands once its retry budget is spent (Phase 8).
+   *
+   * Nothing consumes it: it is a durable parking lot, not a pipeline. A queue
+   * rather than a table because the *job* is what we want to keep — its
+   * payload, its attempt count, its failure reason — and BullMQ already stores
+   * all three with a bounded retention.
+   */
   deploymentsDlq: 'deployments-dlq',
+  /**
+   * Stop/restart requests for a running container. Separate from
+   * `deployments` on purpose: the API cannot call Docker itself, and a stop
+   * must not queue behind a five-minute build.
+   */
+  containerActions: 'container-actions',
 } as const;
 
 /** BullMQ job name inside the `deployments` queue. */
 export const DEPLOYMENT_JOB_NAME = 'deploy';
+
+/** BullMQ job name inside the `container-actions` queue. */
+export const CONTAINER_ACTION_JOB_NAME = 'container-action';
+
+/** BullMQ job name inside the `deployments-dlq` queue. */
+export const DEAD_LETTER_JOB_NAME = 'dead-letter';
 
 /**
  * How long a worker's Redis heartbeat key lives past its last write. Three

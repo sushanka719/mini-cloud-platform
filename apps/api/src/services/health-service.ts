@@ -37,11 +37,27 @@ async function check(label: string, probe: () => Promise<void>): Promise<Depende
   }
 }
 
-export async function getHealth(version: string): Promise<HealthResponse> {
+/**
+ * Probes both dependencies in parallel.
+ *
+ * Split out from `getHealth` for the Phase 9 metrics snapshot, which wants the
+ * same two probes without the service/version/uptime envelope — one prober,
+ * so the metrics page and `/health` can never disagree about whether Postgres
+ * is up.
+ */
+export async function checkDependencies(): Promise<{
+  postgres: DependencyHealth;
+  redis: DependencyHealth;
+}> {
   const [postgres, redis] = await Promise.all([
     check('postgres', pingDb),
     check('redis', pingRedis),
   ]);
+  return { postgres, redis };
+}
+
+export async function getHealth(version: string): Promise<HealthResponse> {
+  const { postgres, redis } = await checkDependencies();
 
   return {
     ok: postgres.ok && redis.ok,

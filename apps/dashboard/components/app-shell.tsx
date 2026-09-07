@@ -18,7 +18,9 @@ export function AppShell({ orgSlug, children }: { orgSlug: string; children: Rea
 
   const nav = [
     { href: `/orgs/${orgSlug}`, label: 'Projects', exact: true },
+    { href: `/orgs/${orgSlug}/containers`, label: 'Containers' },
     { href: `/orgs/${orgSlug}/fleet`, label: 'Fleet' },
+    { href: `/orgs/${orgSlug}/metrics`, label: 'Metrics' },
     { href: `/orgs/${orgSlug}/members`, label: 'Members' },
     { href: `/orgs/${orgSlug}/api-keys`, label: 'API keys' },
   ];

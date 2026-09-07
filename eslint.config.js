@@ -3,7 +3,20 @@ import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 
 export default tseslint.config(
-  { ignores: ['**/dist/**', '**/.next/**', '**/node_modules/**', '**/*.d.ts', 'storage/**'] },
+  {
+    // `examples/` holds sample apps that ForgeCloud *deploys*; they are user
+    // code by definition and are not held to this repo's rules. `builds/` is
+    // the sandbox root, which is full of other people's source.
+    ignores: [
+      '**/dist/**',
+      '**/.next/**',
+      '**/node_modules/**',
+      '**/*.d.ts',
+      'storage/**',
+      'builds/**',
+      'examples/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
@@ -18,7 +31,16 @@ export default tseslint.config(
     // Node globals for config files and any plain JS/MJS tooling scripts.
     files: ['**/*.{js,mjs,cjs}'],
     languageOptions: {
-      globals: { process: 'readonly', console: 'readonly', __dirname: 'readonly' },
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        __dirname: 'readonly',
+        // Added for scripts/cluster.mjs, whose shutdown backstop is a timer.
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+      },
     },
   },
   {

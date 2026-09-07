@@ -116,7 +116,13 @@ export function toStoredFile(row: FileRow): StoredFile {
   };
 }
 
-export function toDeployment(row: DeploymentRow): Deployment {
+/**
+ * The join is optional so a plain `DeploymentRow` — what the write paths hand
+ * back — still serializes. The list reads that feed the dashboard supply
+ * `worker_name`; a create/retry response has no reason to make a second query
+ * for a name nobody is showing yet.
+ */
+export function toDeployment(row: DeploymentRow & { worker_name?: string | null }): Deployment {
   return {
     id: row.id,
     projectId: row.project_id,
@@ -126,8 +132,11 @@ export function toDeployment(row: DeploymentRow): Deployment {
     sourceFileId: row.source_file_id,
     idempotencyKey: row.idempotency_key,
     attempt: row.attempt,
+    maxAttempts: row.max_attempts,
+    deadLetteredAt: row.dead_lettered_at ? iso(row.dead_lettered_at as unknown as Date) : null,
     triggeredBy: row.triggered_by,
     workerId: row.worker_id,
+    workerName: row.worker_name ?? null,
     parentDeploymentId: row.parent_deployment_id,
     imageTag: row.image_tag,
     containerId: row.container_id,

@@ -89,17 +89,26 @@ async function realtimePlugin(app: FastifyInstance): Promise<void> {
    * re-checked here against the authoritative stores.
    */
   async function revalidateAccess(): Promise<void> {
+    // Set the first time a session check fails on the transport rather than on
+    // the credential. Every remaining socket would fail the same way, so the
+    // session half is skipped for the rest of the pass — but the subscription
+    // half below reads Postgres and is unaffected, so it still runs. Bailing
+    // out of the whole loop (as this did) meant one Redis blip also skipped
+    // every socket's authorization refresh.
+    let redisDown = false;
+
     for (const client of sockets) {
       const token = client.sessionToken;
-      if (token) {
+      if (token && !redisDown) {
         let valid = true;
         try {
           valid = (await readSession(token)) !== null;
         } catch (err) {
           // Redis unreachable: keep the socket. Failing open here matches the
           // rate limiter, and /health reports the outage.
-          app.log.warn({ err }, 'could not revalidate ws session');
-          return;
+          app.log.warn({ err }, 'could not revalidate ws sessions');
+          redisDown = true;
+          valid = true;
         }
         if (!valid) {
           app.log.info({ socketId: client.id }, 'ws session revoked, closing socket');

@@ -19,6 +19,7 @@
     "@fastify/websocket": "^11.3.0",
     "@forge/config": "workspace:*",
     "@forge/db": "workspace:*",
+    "@forge/metrics": "workspace:*",
     "@forge/queue": "workspace:*",
     "@forge/shared": "workspace:*",
     "@forge/storage": "workspace:*",

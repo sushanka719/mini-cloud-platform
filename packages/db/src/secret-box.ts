@@ -4,6 +4,12 @@ import { env } from '@forge/config';
 /**
  * Symmetric encryption for project env vars at rest (DATA_MODEL §5).
  *
+ * This lives in `@forge/db` because `project_env_vars.value_enc` is a `bytea`
+ * column and its wire format is therefore a persistence detail — and because
+ * both writers need it: the API encrypts on write, and from Phase 6 the worker
+ * decrypts to inject env vars into a build. Duplicating the format in two apps
+ * would be the only alternative.
+ *
  * Wire format, one bytea column:
  *   [0]      version byte
  *   [1..13)  12-byte GCM iv

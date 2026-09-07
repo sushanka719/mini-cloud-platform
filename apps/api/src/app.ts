@@ -14,6 +14,7 @@ import requestContext, { REQUEST_ID_HEADER } from './plugins/request-context.js'
 import rateLimitPlugin from './plugins/rate-limit.js';
 import authPlugin from './plugins/auth.js';
 import realtimePlugin from './plugins/realtime.js';
+import observabilityPlugin from './plugins/observability.js';
 import { healthRoutes } from './routes/health.js';
 import { authRoutes } from './routes/auth.js';
 import { orgRoutes } from './routes/orgs.js';
@@ -21,9 +22,10 @@ import { apiKeyRoutes } from './routes/api-keys.js';
 import { projectRoutes } from './routes/projects.js';
 import { fileRoutes } from './routes/files.js';
 import { deploymentRoutes } from './routes/deployments.js';
+import { metricsRoutes } from './routes/metrics.js';
 import { configureQueueFromEnv } from './lib/queue.js';
 
-export const API_VERSION = '0.5.0';
+export const API_VERSION = '0.10.0';
 
 export async function buildApp(): Promise<FastifyInstance> {
   // Inject REDIS_URL into @forge/queue before any route can enqueue; the queue
@@ -81,6 +83,9 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(authPlugin);
   // After auth: the gateway authenticates the handshake with `request.actor`.
   await app.register(realtimePlugin);
+  // After realtime: this process's metrics document carries its socket and
+  // Pub/Sub counts, which only the gateway knows.
+  await app.register(observabilityPlugin);
 
   await app.register(healthRoutes);
   await app.register(authRoutes);
@@ -89,6 +94,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(projectRoutes);
   await app.register(fileRoutes);
   await app.register(deploymentRoutes);
+  await app.register(metricsRoutes);
 
   return app;
 }

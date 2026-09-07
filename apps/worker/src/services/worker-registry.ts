@@ -46,6 +46,33 @@ export class WorkerRegistry {
     return this.active.size;
   }
 
+  /**
+   * Exposed for the metrics document: it is the same status the heartbeat
+   * writes, and a metrics card that said `idle` while the heartbeat said
+   * `draining` would be two answers to one question.
+   */
+  get currentStatus(): WorkerStatus {
+    return this.status;
+  }
+
+  /** Null before `register()`; the metrics document tolerates that. */
+  get registeredId(): string | null {
+    return this.id;
+  }
+
+  /**
+   * Whether *this* process is running that deployment right now.
+   *
+   * Read by the stalled-job takeover (Phase 10). BullMQ can re-deliver a job
+   * whose lock lapsed to the same worker that is still running it — a long
+   * event-loop block is enough to miss a renewal — and the one thing the
+   * takeover must never do is start a second pipeline for a deployment this
+   * process has in flight.
+   */
+  isRunning(deploymentId: string): boolean {
+    return this.active.has(deploymentId);
+  }
+
   /** Inserts the registry row and starts the heartbeat loop. */
   async register(): Promise<string> {
     const row = await workerRepo.registerWorker({

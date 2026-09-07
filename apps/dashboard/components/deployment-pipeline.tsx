@@ -8,40 +8,54 @@ import { PIPELINE_STAGES, STATUS_LABELS, type DeploymentStatus } from '@/lib/api
  * Position is derived from the deployment's *current* status, which the server
  * owns — the UI never advances a stage on its own. A `failed` deployment keeps
  * the stages it completed and marks the one it died in.
+ *
+ * `skipped` exists for rollbacks (Phase 8). A rollback that reused an existing
+ * image really does jump from `assigned` to `creating_container`, and rendering
+ * clone/install/build as *completed* would be a lie while rendering them as
+ * *pending* would look like a pipeline that lost three stages. They get their
+ * own dashed, struck-through tone that says "deliberately not run".
  */
 export function DeploymentPipeline({
   status,
   failedAfter,
+  skipped,
   compact = false,
 }: {
   status: DeploymentStatus;
   /** The last stage reached before failing, from the event timeline. */
   failedAfter?: DeploymentStatus | null;
+  /** Stages this deployment deliberately did not run (a rollback). */
+  skipped?: readonly DeploymentStatus[];
   compact?: boolean;
 }) {
   const failed = status === 'failed';
   const marker = failed ? (failedAfter ?? 'queued') : status;
   const currentIndex = PIPELINE_STAGES.indexOf(marker);
+  const skippedSet = new Set(skipped ?? []);
 
   return (
     <ol className={`flex flex-wrap items-center ${compact ? 'gap-1' : 'gap-1.5'}`}>
       {PIPELINE_STAGES.map((stage, index) => {
-        const done = index < currentIndex || (status === 'live' && stage === 'live');
-        const active = index === currentIndex && !failed && status !== 'live';
-        const broke = failed && index === currentIndex;
+        const wasSkipped = skippedSet.has(stage);
+        const done =
+          !wasSkipped && (index < currentIndex || (status === 'live' && stage === 'live'));
+        const active = !wasSkipped && index === currentIndex && !failed && status !== 'live';
+        const broke = !wasSkipped && failed && index === currentIndex;
 
-        const tone = broke
-          ? 'border-red-500/50 bg-red-500/15 text-red-300'
-          : done
-            ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-            : active
-              ? 'border-sky-500/60 bg-sky-500/15 text-sky-200'
-              : 'border-[#2c3142] bg-[#141824] text-[#5f6478]';
+        const tone = wasSkipped
+          ? 'border-dashed border-[#3a4056] bg-transparent text-[#4a4f61] line-through'
+          : broke
+            ? 'border-red-500/50 bg-red-500/15 text-red-300'
+            : done
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+              : active
+                ? 'border-sky-500/60 bg-sky-500/15 text-sky-200'
+                : 'border-[#2c3142] bg-[#141824] text-[#5f6478]';
 
         return (
           <li key={stage} className="flex items-center gap-1.5">
             <span
-              title={STATUS_LABELS[stage]}
+              title={wasSkipped ? `${STATUS_LABELS[stage]} — skipped by this rollback` : STATUS_LABELS[stage]}
               className={`rounded-md border px-2 py-1 text-[11px] font-medium transition-colors ${tone} ${
                 active ? 'animate-pulse' : ''
               }`}

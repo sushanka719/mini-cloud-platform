@@ -1,10 +1,14 @@
-import { getDb, type FileRow } from '@forge/db';
+import { getDb } from '../client.js';
+import type { FileRow } from '../types.js';
 import type { FileCompression, FileKind } from '@forge/shared';
 
 /**
  * The `files` table is the index of the local object store: one row per stored
  * object, with the key, its size and its sha256. Reads are always scoped to a
  * project so a file id from another org resolves to "not found".
+ *
+ * Shared rather than API-local because the worker writes here too: a build
+ * produces a log object (and, from Phase 7, an artifact) that needs indexing.
  */
 
 export type InsertFileInput = {
@@ -63,6 +67,24 @@ export async function findProjectFile(
     .where('project_id', '=', projectId)
     .where('id', '=', fileId)
     .executeTakeFirst();
+}
+
+/** Any file id, unscoped — the worker already holds the deployment's row. */
+export async function findFileById(fileId: string): Promise<FileRow | undefined> {
+  return getDb().selectFrom('files').selectAll().where('id', '=', fileId).executeTakeFirst();
+}
+
+/**
+ * Files produced by one deployment — its build log today, its artifact from
+ * Phase 7. Newest first, so "the log" is the first row.
+ */
+export async function listDeploymentFiles(
+  deploymentId: string,
+  kind?: FileKind,
+): Promise<FileRow[]> {
+  let query = getDb().selectFrom('files').selectAll().where('deployment_id', '=', deploymentId);
+  if (kind) query = query.where('kind', '=', kind);
+  return query.orderBy('created_at', 'desc').execute();
 }
 
 /** Just the keys — used to reconcile the DB index against what's on disk. */

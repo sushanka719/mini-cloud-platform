@@ -12,5 +12,6 @@ export function configureQueueFromEnv(): void {
     attempts: env.DEPLOY_JOB_ATTEMPTS,
     backoffMs: env.DEPLOY_JOB_BACKOFF_MS,
     operationTimeoutMs: env.QUEUE_OPERATION_TIMEOUT_MS,
+    deadLetterKeep: env.DEPLOY_DLQ_KEEP,
   });
 }
