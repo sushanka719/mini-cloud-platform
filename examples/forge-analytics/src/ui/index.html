@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>forge-analytics</title>
+    <link rel="stylesheet" href="/app.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>📊</text></svg>"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot" aria-hidden="true"></span>
+        <h1 id="greeting">forge-analytics</h1>
+      </div>
+      <dl class="stamp">
+        <div><dt>build</dt><dd>{{VERSION}}</dd></div>
+        <div><dt>built</dt><dd>{{BUILT_AT}}</dd></div>
+        <div><dt>deployment</dt><dd class="mono" id="deployment">{{DEPLOYMENT}}</dd></div>
+      </dl>
+    </header>
+
+    <main>
+      <section class="kpis" id="kpis" aria-label="Key metrics"></section>
+
+      <nav class="tabs" id="tabs" role="tablist">
+        <button role="tab" data-tab="traffic" class="active">Traffic</button>
+        <button role="tab" data-tab="routes">Routes</button>
+        <button role="tab" data-tab="retention">Retention</button>
+        <button role="tab" data-tab="matrix">Country × day</button>
+        <button role="tab" data-tab="query">Live query</button>
+        <button role="tab" data-tab="build">Build</button>
+      </nav>
+
+      <section class="panel" id="panel-traffic">
+        <div class="panel-head">
+          <h2>Requests per day</h2>
+          <div class="window-picker" id="window-picker"></div>
+        </div>
+        <div class="chart" id="chart-daily"></div>
+        <div class="split">
+          <div><h3>Hour of day</h3><div class="chart small" id="chart-hourly"></div></div>
+          <div><h3>Status codes</h3><div class="bars" id="bars-status"></div></div>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="panel-routes">
+        <div class="panel-head"><h2>Routes</h2><span class="hint">sorted by requests</span></div>
+        <div class="table-wrap"><table id="table-routes"></table></div>
+        <h3>Top countries</h3>
+        <div class="bars" id="bars-countries"></div>
+      </section>
+
+      <section class="panel hidden" id="panel-retention">
+        <div class="panel-head"><h2>Weekly cohort retention</h2></div>
+        <div class="table-wrap"><table id="table-cohorts"></table></div>
+        <h3>Conversion funnel</h3>
+        <div class="funnel" id="funnel"></div>
+        <h3>Sessions</h3>
+        <div class="bars" id="session-stats"></div>
+      </section>
+
+      <section class="panel hidden" id="panel-matrix">
+        <div class="panel-head">
+          <h2>Requests by country and day</h2>
+          <span class="hint">precomputed at build time — one filtered pass per cell</span>
+        </div>
+        <div class="table-wrap"><div id="heatmap"></div></div>
+      </section>
+
+      <section class="panel hidden" id="panel-query">
+        <div class="panel-head">
+          <h2>Live query</h2>
+          <span class="hint">walks the resident event corpus — not precomputed</span>
+        </div>
+        <form class="query" id="query-form">
+          <label>Country <select id="q-country"></select></label>
+          <label>Route <select id="q-route"></select></label>
+          <label>Hour <select id="q-hour"></select></label>
+          <label>From day <input id="q-from" type="number" min="0" max="89" value="0" /></label>
+          <label>To day <input id="q-to" type="number" min="1" max="90" value="90" /></label>
+          <button type="submit">Run query</button>
+        </form>
+        <div id="query-result" class="query-result"></div>
+      </section>
+
+      <section class="panel hidden" id="panel-build">
+        <div class="panel-head"><h2>Build provenance</h2></div>
+        <div class="split">
+          <div><h3>Stages</h3><div class="bars" id="build-stages"></div></div>
+          <div><h3>Runtime</h3><div class="bars" id="runtime-stats"></div></div>
+        </div>
+        <h3>Artifacts</h3>
+        <div class="table-wrap"><table id="table-assets"></table></div>
+      </section>
+    </main>
+
+    <footer>
+      <span id="footer-note">loading…</span>
+      <span class="grow"></span>
+      <span class="mono" id="footer-checksum"></span>
+    </footer>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

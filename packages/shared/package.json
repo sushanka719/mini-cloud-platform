@@ -5,13 +5,27 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
-  "files": ["dist"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./binary-search": {
+      "types": "./dist/binary-search.d.ts",
+      "default": "./dist/binary-search.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && node --test test/",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
-  "dependencies": { "zod": "^3.25.76" }
+  "dependencies": {
+    "zod": "^3.25.76"
+  }
 }

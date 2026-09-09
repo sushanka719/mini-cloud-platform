@@ -19,6 +19,7 @@ along the way, how it was verified, and what's deliberately left for later.
 | 10 | Local scaling | ✅ Done | 2026-09-07 |
 | 11 | Hardening & failure demos | ⬜ Not started | — |
 | 12 | Polish for presentation | ⬜ Not started | — |
+| A | *Addendum:* binary search over deployment history | ✅ Done | 2026-09-08 |
 
 ---
 
@@ -2731,3 +2732,96 @@ worker-thread demonstration, and the security pass. The one caveat to carry over
 ten phases in, every claim in these tables was verified by a scratchpad script that was then thrown
 away, and Phase 11 is the phase where "prove the security rules hold" really wants an assertion
 suite that stays in the repo.
+
+---
+
+## Addendum A — Binary search over the deployment history
+
+**Not a roadmap phase.** A self-contained addition made between Phases 10 and 11, recorded here
+because it changes shipped code and because it is the first assertion suite that stays in the repo.
+
+**Why it exists:** the write-up's algorithms chapter documents five algorithms, all of which are
+*systems* algorithms — idempotent creation, streamed build execution, container release, worker
+recovery, rollback. None is a classical algorithm with a name and a complexity class, and the parts
+that sound like one are borrowed: idempotency leans on Postgres' B-tree index, backoff is BullMQ's,
+the token bucket is `@fastify/rate-limit`'s, SHA-256 is `node:crypto`'s. This adds one classical
+algorithm that is genuinely ours, at a call site where it is genuinely the right tool.
+
+### What shipped
+
+**`@forge/shared`**
+- `src/binary-search.ts` — `lowerBound`, `upperBound`, `binarySearch`, `searchRange`, `sliceRange`,
+  `findAtOrBefore`. Comparator-driven and order-aware (`order: 'desc'` negates the comparator, so
+  one loop serves both directions rather than two copies of each function). Every function is the
+  same half-open `[lo, hi)` loop with the overflow-safe midpoint `lo + ((hi - lo) >> 1)`.
+- An optional `onProbe` callback on every search, so a caller can render the probe sequence. This
+  is the only concession the module makes to its UI caller, and it costs nothing when unused.
+- `test/binary-search.test.mjs` — 108k differential assertions under `node --test`.
+- New subpath export `@forge/shared/binary-search`, so the browser can import the algorithm without
+  pulling `index.js` (and therefore Zod) into the bundle.
+
+**`@forge/dashboard`**
+- `components/deployments-panel.tsx` — a "What was live at ⟨time⟩" control above the deployment
+  history. The list is already in memory sorted `created_at DESC`, so the lookup is a predecessor
+  search over it: `findAtOrBefore(list, target, deploymentTime, { order: 'desc' })`. The result line
+  reports the probe count against the row index a linear scan would have reached, and each probed
+  row is numbered in the list in the order the search touched it.
+- `mergeEvents` in the same file no longer rebuilds a `Set` of every event id on screen to
+  de-duplicate each incoming batch; it binary-searches the (already id-sorted) timeline instead.
+  This is on the log-streaming hot path — it ran every `FLUSH_MS` against a timeline thousands of
+  lines long.
+- First runtime dependency on a workspace package (`@forge/shared`), where before the dashboard
+  mirrored shared types structurally. The convention is unchanged for *types*; this is runtime code
+  that would otherwise have to be duplicated.
+
+### Decisions & assumptions
+
+- **Browser-side, not in a repository.** The obvious server version of this query is
+  `WHERE created_at <= $1 ORDER BY created_at DESC LIMIT 1`, and Postgres' index already answers it
+  in log time — hand-writing that would be a worse implementation of something the database does
+  properly. The honest justification for our own binary search is that the dashboard already holds
+  the sorted page and a network round trip per keystroke is the thing being avoided.
+- **`findAtOrBefore`, not `binarySearch`, for the seek.** A timestamp typed into a box will never
+  be a timestamp a deployment actually has, so exact match answers "nothing" to a reasonable
+  question. Predecessor search is the right form.
+- **Order handled by negating the comparator** rather than by separate ascending/descending
+  functions, so the two orders cannot drift apart. Every function then reads in *array order*.
+- **`node --test` rather than Vitest.** The testable surface is one file of pure functions; the
+  runtime has had a test runner since Node 18, and this avoids adding a dev dependency and a config
+  file for it. If Phase 11 brings Vitest in for the API's `.inject()` tests, this suite should move.
+- **Differential testing, not examples.** Hand-picked cases would have been chosen by whoever wrote
+  the off-by-one. Every result is compared against a linear scan over randomly generated arrays
+  drawn from a deliberately small key domain, so duplicate keys — where `lowerBound` and
+  `upperBound` diverge — are the common case rather than an afterthought.
+
+### Verification
+
+- `pnpm --filter @forge/shared test` — **4/4 suites, 108,248 assertions pass.** Covers: both orders
+  against a linear reference; empty, single-element and all-duplicate arrays; targets before, on and
+  after every boundary; inverted ranges; the real deployment-history shape; and a probe-count
+  assertion that the search stays within `ceil(log2(n+1))`, measured at n = 1 → 100,000
+  (1, 4, 7, 10, 14, 17 probes respectively — i.e. 17 comparisons where a scan would take 100,000).
+- `pnpm typecheck` — clean across all 10 workspace projects.
+- `pnpm lint` — clean.
+- `pnpm --filter @forge/dashboard build` — clean; the project page is 12.8 kB and the shared chunks
+  are unchanged, confirming the subpath export kept Zod out of the browser bundle.
+- **Not verified in a browser.** The dev server running on port 3000 was left alone rather than
+  restarted mid-session, so the seek control has been compiled and type-checked but not clicked.
+
+### Not done / deferred on purpose
+
+- **No metrics-chart call site.** `lib/metrics.ts` keeps 150-point series that would slice nicely
+  with `searchRange`, but nothing on the metrics page filters by time window today, so adding the
+  method would have added an unused one. `searchRange`/`sliceRange` ship tested but currently
+  unused by application code.
+- **No server-side caller.** Nothing in the API or worker uses the module; the sorted-lookup work
+  there belongs to Postgres.
+- **`percentileOf` still sorts.** It is O(n log n) via `Array.prototype.sort` where Quickselect
+  would be O(n) average, and it is the other place a classical algorithm would genuinely replace a
+  borrowed one. Left alone deliberately — it is a separate change with a separate benchmark.
+
+### Next up
+
+Unchanged: Phase 11 (Hardening & failure demos). The one thing this addendum hands it is a pattern
+for the test debt named at the end of Phase 10 — `node --test` against built `dist/`, differential
+where a reference implementation is cheap to write.

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   api,
@@ -19,6 +19,7 @@ import {
   type RollbackTarget,
   type StoredFile,
 } from '@/lib/api';
+import { binarySearch, findAtOrBefore } from '@forge/shared/binary-search';
 import { frameToEvent, topics, type WsErrorFrame } from '@/lib/realtime';
 import { useRealtime, useTopic } from '@/components/realtime-provider';
 import { Button, Empty, ErrorNote, Panel } from '@/components/ui/primitives';
@@ -138,6 +139,33 @@ export function DeploymentsPanel({
   );
 
   const list = deployments.data ?? [];
+
+  /**
+   * "Which deployment was current at 14:32?" — answered locally, by binary
+   * search over the history already on screen.
+   *
+   * `list` arrives sorted `created_at DESC` and stays that way (the WebSocket
+   * patches rows in place and prepends new ones), so it is a sorted array and
+   * the question is a predecessor search: the *first* row at or before the
+   * target, because the timestamp asked about is never a timestamp a
+   * deployment actually has. Asking the API instead would be a round trip per
+   * keystroke to answer something the page already knows.
+   *
+   * `probes` is collected so the list can show the search working — the point
+   * of writing this by hand is lost if the O(log n) is invisible.
+   */
+  const [seekInput, setSeekInput] = useState('');
+  const seek = useMemo(() => {
+    if (seekInput === '') return null;
+    const target = Date.parse(seekInput);
+    if (Number.isNaN(target)) return null;
+    const probes: number[] = [];
+    const hit = findAtOrBefore(list, target, deploymentTime, {
+      order: 'desc',
+      onProbe: (index) => probes.push(index),
+    });
+    return { target, hit: hit ?? null, probes };
+  }, [seekInput, list]);
   const selected = list.find((d) => d.id === selectedId) ?? list[0] ?? null;
   const { events: timeline, notice } = useDeploymentTimeline(orgSlug, projectId, selected);
   const files = useDeploymentFiles(orgSlug, projectId, selected);
@@ -450,20 +478,31 @@ export function DeploymentsPanel({
         />
       )}
 
+      {list.length > 0 && (
+        <HistorySeek
+          value={seekInput}
+          onChange={setSeekInput}
+          total={list.length}
+          result={seek}
+          onSelect={setSelectedId}
+        />
+      )}
+
       {deployments.isPending ? (
         <p className="text-sm text-[#8b90a3]">Loading deployments…</p>
       ) : list.length === 0 ? (
         <Empty>No deployments yet. Upload a source archive, then hit Deploy.</Empty>
       ) : (
         <ul className="divide-y divide-[#1c202b]">
-          {list.map((deployment) => (
+          {list.map((deployment, index) => (
             <li key={deployment.id}>
               <button
                 onClick={() => setSelectedId(deployment.id)}
                 className={`flex w-full flex-wrap items-center gap-3 px-1 py-2.5 text-left transition-colors hover:bg-[#141824] ${
                   selected?.id === deployment.id ? 'bg-[#141824]' : ''
-                }`}
+                } ${seek?.hit?.item.id === deployment.id ? 'ring-1 ring-inset ring-sky-400/60' : ''}`}
               >
+                <ProbeMark order={seek ? seek.probes.indexOf(index) : -1} />
                 <StatusBadge status={deployment.status} />
                 <span className="font-mono text-xs text-[#6e7387]">
                   {deployment.id.slice(0, 8)}
@@ -499,6 +538,114 @@ export function DeploymentsPanel({
         </ul>
       )}
     </Panel>
+  );
+}
+
+/** The sort key of the history list: what the binary search compares on. */
+const deploymentTime = (deployment: Deployment) => Date.parse(deployment.createdAt);
+
+type SeekResult = {
+  target: number;
+  hit: { index: number; item: Deployment } | null;
+  probes: number[];
+};
+
+/**
+ * The time machine over the deployment history.
+ *
+ * A `datetime-local` input rather than a free-text one so the value parses the
+ * same way in every browser, and local time because the timestamps beside it
+ * are rendered local too — asking someone to convert to UTC to use their own
+ * deployment history would be a strange thing to do.
+ */
+function HistorySeek({
+  value,
+  onChange,
+  total,
+  result,
+  onSelect,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  total: number;
+  result: SeekResult | null;
+  onSelect: (id: string) => void;
+}) {
+  // Worst case for a linear scan is the whole list; for this search it is the
+  // number of times `total` halves. Shown side by side because that gap is the
+  // entire justification for the algorithm.
+  const worstCaseProbes = Math.ceil(Math.log2(total + 1));
+
+  return (
+    <div className="mb-3 rounded-lg border border-[#1c202b] bg-[#0f1219] px-3 py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <label htmlFor="history-seek" className="text-xs font-medium text-[#8b90a3]">
+          What was live at
+        </label>
+        <input
+          id="history-seek"
+          type="datetime-local"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          className="rounded-md border border-[#2c3142] bg-[#171a24] px-2 py-1 text-xs text-[#e6e8ef] outline-none focus:border-sky-400/60"
+        />
+        {value !== '' && (
+          <Button variant="ghost" className="px-2 py-1 text-xs" onClick={() => onChange('')}>
+            clear
+          </Button>
+        )}
+        <span className="ml-auto font-mono text-[11px] text-[#4f5468]">
+          binary search · {total} row{total === 1 ? '' : 's'} · ≤{worstCaseProbes} probe
+          {worstCaseProbes === 1 ? '' : 's'}
+        </span>
+      </div>
+
+      {result && (
+        <p className="mt-2 text-xs">
+          {result.hit ? (
+            <>
+              <button
+                onClick={() => onSelect(result.hit?.item.id ?? '')}
+                className="font-mono text-sky-300 underline-offset-2 hover:underline"
+              >
+                {result.hit.item.id.slice(0, 8)}
+              </button>
+              <span className="text-[#8b90a3]">
+                {' '}
+                was the newest deployment at {new Date(result.target).toLocaleString()} — row{' '}
+                {result.hit.index + 1} of {total}, found in {result.probes.length} probe
+                {result.probes.length === 1 ? '' : 's'} ({result.probes.join(' → ')}) instead of a{' '}
+                {result.hit.index + 1}-row scan.
+              </span>
+            </>
+          ) : (
+            <span className="text-[#8b90a3]">
+              Nothing had been deployed yet at {new Date(result.target).toLocaleString()}. Checked{' '}
+              {result.probes.length} row{result.probes.length === 1 ? '' : 's'} to rule out all{' '}
+              {total}.
+            </span>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The order in which the search looked at this row, or nothing.
+ *
+ * A fixed-width slot even when empty, so the rows do not shift horizontally
+ * the moment a search starts.
+ */
+function ProbeMark({ order }: { order: number }) {
+  if (order < 0) return <span className="w-4" aria-hidden />;
+  return (
+    <span
+      className="w-4 text-center font-mono text-[10px] text-sky-400/80"
+      title={`Probe ${order + 1}`}
+    >
+      {order + 1}
+    </span>
   );
 }
 
@@ -887,11 +1034,20 @@ function useDeploymentTimeline(
  * list ordered. Duplicates are normal: a reconnect's replay overlaps whatever
  * the polling fallback already collected.
  */
+const eventIdOf = (event: DeploymentEvent) => event.id;
+
 function mergeEvents(prev: DeploymentEvent[], batch: DeploymentEvent[]): DeploymentEvent[] {
-  const seen = new Set(prev.map((event) => event.id));
+  // `prev` is sorted ascending on the monotonic event id, so "have I already
+  // got this one?" is a binary search rather than a Set rebuilt from the whole
+  // timeline. That matters on the hot path: during a noisy build this runs
+  // every FLUSH_MS against a list that is thousands of lines long, and the Set
+  // cost an O(prev) rebuild and allocation to answer O(batch) questions.
+  // Within-batch duplicates still need a set, but it only ever holds the batch.
+  const accepted = new Set<number>();
   const fresh = batch.filter((event) => {
-    if (seen.has(event.id)) return false;
-    seen.add(event.id);
+    if (accepted.has(event.id)) return false;
+    if (binarySearch(prev, event.id, eventIdOf) !== -1) return false;
+    accepted.add(event.id);
     return true;
   });
   if (fresh.length === 0) return prev;
