@@ -10,3 +10,4 @@ export * from './builds.js';
 export * from './containers.js';
 export * from './realtime.js';
 export * from './metrics.js';
+export * from './binary-search.js';
